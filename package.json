@@ -1,0 +1,30 @@
+{
+  "name": "myschoolone-holo-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hybrid Holo3.1 + Playwright downloader for MySchoolOne Pro photo attachments.",
+  "scripts": {
+    "login": "tsx src/login.ts",
+    "daily": "tsx src/daily.ts",
+    "status": "tsx src/status.ts",
+    "agent": "tsx src/agent.ts",
+    "capture": "tsx src/capture.ts",
+    "check": "tsc --noEmit",
+    "install-browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "openai": "^5.10.2",
+    "playwright": "^1.54.1",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
