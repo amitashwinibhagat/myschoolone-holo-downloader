@@ -13,6 +13,19 @@ import {
   sha256,
 } from "./utils.js";
 
+/** Send a photo to Telegram so it arrives directly in the chat. */
+async function sendPhotoToTelegram(buffer: Buffer, caption: string): Promise<void> {
+  if (!config.telegramBotToken || !config.telegramChatId) return;
+  const form = new FormData();
+  form.append("chat_id", config.telegramChatId);
+  form.append("photo", new Blob([new Uint8Array(buffer)], { type: "image/jpeg" }), "photo.jpg");
+  form.append("caption", caption);
+  await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  }).catch((err) => console.warn(`  ! Telegram photo send failed: ${(err as Error).message}`));
+}
+
 interface CandidateImage {
   url: string;
   width: number;
@@ -193,6 +206,10 @@ export class DownloadManager {
       downloadedAt: new Date().toISOString(),
     });
     await this.store.save();
+
+    // Deliver the compressed image to Telegram.
+    await sendPhotoToTelegram(output, `${dateLabel || dateInIndia()} — ${name}`);
+
     return { saved: true, duplicate: false, path: destination };
   }
 }
