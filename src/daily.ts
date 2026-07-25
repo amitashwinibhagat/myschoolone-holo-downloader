@@ -28,6 +28,22 @@ interface RunTotals {
 }
 
 async function notify(title: string, message: string): Promise<void> {
+  // Prefer Telegram when configured (works even when you're not at the Mac).
+  if (config.telegramBotToken && config.telegramChatId) {
+    await fetch(
+      `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: config.telegramChatId,
+          text: `${title}\n${message}`,
+        }),
+      },
+    ).catch(() => undefined);
+    return;
+  }
+  // Fallback: local macOS notification (only visible at the machine).
   const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`;
   await exec("osascript", ["-e", script]).catch(() => undefined);
 }

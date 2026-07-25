@@ -45,4 +45,7 @@ export const config = {
   compressImages: (process.env.COMPRESS_IMAGES?.trim() ?? "true").toLowerCase() !== "false",
   maxDimension: integer("MAX_DIMENSION", 2048),
   jpegQuality: integer("JPEG_QUALITY", 82),
+  // Telegram notifications (optional — falls back to macOS osascript).
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
+  telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
 };
