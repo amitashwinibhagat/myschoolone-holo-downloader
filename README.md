@@ -75,9 +75,9 @@ Manually navigate to the troublesome page and press Enter. This creates a local 
 
 ## 6. Scheduling — only after manual runs work
 
-The included script installs a macOS LaunchAgent that checks today's Daily Log
-every 10 minutes from 1:00 PM through 8:50 PM IST on weekdays, then performs a
-seven-day reconciliation at 9:00 PM:
+The included script installs a macOS LaunchAgent that runs the downloader at
+**3:00 PM** and **9:00 PM** IST on weekdays, checking the last 7 days for new
+photos each time:
 
 ```bash
 ./scripts/install-launch-agent.sh

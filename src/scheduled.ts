@@ -2,75 +2,37 @@ import { config } from "./config.js";
 import { pingHealthcheck, notify } from "./notify.js";
 import { runDownload } from "./run-download.js";
 import { acquireRunLock } from "./run-lock.js";
-import { DownloadStore, type RunMode, type RunRecord } from "./store.js";
-import { indiaTime, sleep } from "./utils.js";
-import { modeForClock } from "./schedule-window.js";
+import { DownloadStore, type RunRecord } from "./store.js";
+import { indiaTime } from "./utils.js";
 
-type RequestedMode = "auto" | "fast" | "reconcile";
-
-function requestedMode(): RequestedMode {
-  const index = process.argv.indexOf("--mode");
-  const value = index === -1 ? "auto" : process.argv[index + 1];
-  if (value === "auto" || value === "fast" || value === "reconcile") return value;
-  throw new Error("--mode must be auto, fast, or reconcile.");
-}
-
-function selectAutoMode(): RunMode | undefined {
-  return modeForClock(indiaTime());
-}
-
-async function acquireForMode(mode: RunMode) {
-  const deadline = mode === "reconcile" ? Date.now() + 50 * 60_000 : Date.now();
-  let lock = await acquireRunLock(config.stateDir, mode, "scheduled");
-  while (!lock.acquired && Date.now() < deadline) {
-    console.log("Reconciliation waiting for active downloader lock...");
-    await sleep(2 * 60_000);
-    lock = await acquireRunLock(config.stateDir, mode, "scheduled");
-  }
-  return lock;
-}
-
-async function record(store: DownloadStore, run: RunRecord): Promise<void> {
-  await store.recordRun(run);
-  console.log(`${run.mode}/${run.outcome}: ${run.saved} new, ${run.duplicates} duplicates, ${run.failures} failed.`);
+function isWeekday(): boolean {
+  return indiaTime().weekday >= 1 && indiaTime().weekday <= 5;
 }
 
 async function main(): Promise<void> {
-  const requested = requestedMode();
   const dryRun = process.argv.includes("--dry-run");
-  const selected = requested === "auto" ? selectAutoMode() : requested;
   const startedAt = new Date().toISOString();
   const store = new DownloadStore(config.stateDir);
   await store.load();
 
-  if (!selected) {
-    await record(store, {
-      startedAt,
-      finishedAt: new Date().toISOString(),
-      source: "scheduled",
-      mode: "fast",
-      transport: "browser",
-      outcome: "off_hours",
-      saved: 0,
-      duplicates: 0,
-      failures: 0,
-      daysChecked: 0,
-    });
+  if (!isWeekday()) {
+    console.log("Weekend — skipping.");
     return;
   }
 
   if (dryRun) {
-    console.log(`Dry run: selected ${selected} mode (${selected === "fast" ? 1 : config.lookbackDays} day lookback).`);
+    console.log(`Dry run: weekday, ${config.lookbackDays}-day lookback.`);
     return;
   }
 
-  const lock = await acquireForMode(selected);
+  const lock = await acquireRunLock(config.stateDir, "reconcile", "scheduled");
   if (!lock.acquired) {
-    await record(store, {
+    console.log(`Locked by ${lock.owner?.mode} run from ${lock.owner?.startedAt}. Skipping.`);
+    await store.recordRun({
       startedAt,
       finishedAt: new Date().toISOString(),
       source: "scheduled",
-      mode: selected,
+      mode: "reconcile",
       transport: "browser",
       outcome: "skipped_locked",
       saved: 0,
@@ -83,12 +45,12 @@ async function main(): Promise<void> {
   }
 
   try {
-    const result = await runDownload(store, selected === "fast" ? 1 : config.lookbackDays);
+    const result = await runDownload(store, config.lookbackDays);
     const run: RunRecord = {
       startedAt,
       finishedAt: new Date().toISOString(),
       source: "scheduled",
-      mode: selected,
+      mode: "reconcile",
       transport: result.transport,
       outcome: "success",
       saved: result.saved,
@@ -96,23 +58,22 @@ async function main(): Promise<void> {
       failures: result.failures.length,
       daysChecked: result.daysChecked,
     };
-    await record(store, run);
+    await store.recordRun(run);
+    console.log(`${run.outcome}: ${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed.`);
 
-    if (result.saved > 0) await notify("School photos", `${result.saved} new photo(s) saved (${selected} poll).`);
-    if (selected === "reconcile") {
-      await notify(
-        "School photos — daily summary",
-        `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed (${result.daysChecked} day view(s), ${result.transport}).`,
-      );
-      await pingHealthcheck("success");
-    }
+    if (result.saved > 0) await notify("School photos", `${result.saved} new photo(s) saved.`);
+    await notify(
+      "School photos — daily summary",
+      `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed (${result.daysChecked} day view(s), ${result.transport}).`,
+    );
+    await pingHealthcheck("success");
   } catch (error) {
     const message = (error as Error).message;
-    await record(store, {
+    await store.recordRun({
       startedAt,
       finishedAt: new Date().toISOString(),
       source: "scheduled",
-      mode: selected,
+      mode: "reconcile",
       transport: "browser",
       outcome: "failure",
       saved: 0,
@@ -121,8 +82,9 @@ async function main(): Promise<void> {
       daysChecked: 0,
       error: message,
     });
-    await notify("School photos — FAILED", `${selected} run: ${message.slice(0, 180)}`);
-    if (selected === "reconcile") await pingHealthcheck("fail");
+    console.error(`Failed: ${message}`);
+    await notify("School photos — FAILED", message.slice(0, 180));
+    await pingHealthcheck("fail");
     throw error;
   } finally {
     await lock.release();

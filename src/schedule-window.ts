@@ -14,10 +14,8 @@ export function modeForClock(clock: ScheduleClock): Exclude<RunMode, "manual"> |
 }
 
 export function schedulerCalendarTimes(): Array<{ hour: number; minute: number }> {
-  const times: Array<{ hour: number; minute: number }> = [];
-  for (let hour = 13; hour <= 20; hour += 1) {
-    for (const minute of [0, 10, 20, 30, 40, 50]) times.push({ hour, minute });
-  }
-  times.push({ hour: 21, minute: 0 });
-  return times;
+  return [
+    { hour: 15, minute: 0 },
+    { hour: 21, minute: 0 },
+  ];
 }

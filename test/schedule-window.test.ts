@@ -12,11 +12,9 @@ test("selects fast polling only in the weekday 13:00-20:59 window", () => {
   assert.equal(modeForClock({ weekday: 6, hour: 15, minute: 0 }), undefined);
 });
 
-test("creates 48 fast slots plus one reconciliation slot", () => {
+test("creates exactly two calendar entries for 15:00 and 21:00", () => {
   const times = schedulerCalendarTimes();
-  assert.equal(times.length, 49);
-  assert.deepEqual(times[0], { hour: 13, minute: 0 });
-  assert.deepEqual(times[47], { hour: 20, minute: 50 });
-  assert.deepEqual(times[48], { hour: 21, minute: 0 });
-  assert.equal(new Set(times.map((time) => `${time.hour}:${time.minute}`)).size, 49);
+  assert.equal(times.length, 2);
+  assert.deepEqual(times[0], { hour: 15, minute: 0 });
+  assert.deepEqual(times[1], { hour: 21, minute: 0 });
 });
