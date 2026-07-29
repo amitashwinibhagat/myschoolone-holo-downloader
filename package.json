@@ -9,6 +9,7 @@
     "daily": "tsx src/daily.ts",
     "status": "tsx src/status.ts",
     "agent": "tsx src/agent.ts",
+    "poll": "tsx src/poll.ts",
     "capture": "tsx src/capture.ts",
     "check": "tsc --noEmit",
     "install-browser": "playwright install chromium"
