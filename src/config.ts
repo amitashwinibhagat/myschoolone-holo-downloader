@@ -55,4 +55,7 @@ export const config = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
   healthcheckUrl: process.env.HEALTHCHECK_URL?.trim() || "",
+  // AI mode: "auto" uses the Holo agent for complex navigation, "none" forces
+  // deterministic-only operation (no screenshots sent to external APIs).
+  aiMode: (process.env.AI_MODE?.trim() || "auto") as "auto" | "none",
 };

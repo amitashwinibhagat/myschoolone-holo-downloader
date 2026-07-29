@@ -6,6 +6,7 @@ import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore, type RunTransport } from "./store.js";
 import { observeDailyLogRequests } from "./direct-discovery.js";
+import { directPollAttachments, isDirectPollAvailable, fetchAttachmentBuffer } from "./direct-api.js";
 import { dateInIndia, sleep } from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
@@ -28,6 +29,23 @@ function istDate(daysAgo: number): { iso: string; portal: string } {
   const iso = dateInIndia(new Date(Date.now() - daysAgo * 86_400_000));
   const [year, month, day] = iso.split("-");
   return { iso, portal: `${day}/${month}/${year}` };
+}
+
+/**
+ * Load cookies from the saved session state for direct HTTP requests.
+ * Re-exported from direct-api for use in the run-download module.
+ */
+async function loadCookiesForDirect(): Promise<Array<{
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+}>> {
+  const fs_ = await import("node:fs/promises");
+  const statePath = config.sessionStatePath;
+  const raw = await fs_.readFile(statePath, "utf8");
+  const state = JSON.parse(raw) as { cookies: Array<{ name: string; value: string; domain: string; path: string }> };
+  return state.cookies || [];
 }
 
 function appFrame(page: Page): Frame {
@@ -132,6 +150,61 @@ async function writeFailureDebug(page: Page): Promise<void> {
   await fs.writeFile(path.join(dir, "page.html"), await page.content().catch(() => ""));
 }
 
+/**
+ * Attempt downloads via direct HTTP requests (no browser).
+ * Uses saved session cookies to call the portal's AJAX endpoints directly.
+ */
+async function directAttempt(store: DownloadStore, lookbackDays: number): Promise<RunTotals> {
+  const downloads = new DownloadManager(store);
+  const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0 };
+
+  const results = await directPollAttachments(lookbackDays);
+
+  for (const dayResult of results) {
+    totals.daysChecked += 1;
+    if (dayResult.urls.length === 0) continue;
+
+    // Load cookies once for the batch
+    const cookies = await loadCookiesForDirect();
+
+    for (const url of dayResult.urls) {
+      try {
+        const downloaded = await fetchAttachmentBuffer(cookies, url);
+        if (!downloaded) {
+          totals.failures.push(`${url.slice(-40)}: HTTP request failed`);
+          continue;
+        }
+
+        // Determine a reasonable filename from the URL
+        const urlParts = url.split("/");
+        const rawName = decodeURIComponent(urlParts[urlParts.length - 1] || "school-photo");
+        const suggestedName = rawName.split("?")[0] || "school-photo";
+
+        const result = await downloads.saveFromBuffer(
+          downloaded.buffer,
+          url,
+          downloaded.contentType,
+          suggestedName,
+          dayResult.dateLabel,
+        );
+
+        if (result.saved) {
+          totals.saved += 1;
+          console.log(`  ✓ Saved ${result.path}`);
+        } else if (result.duplicate) {
+          totals.duplicates += 1;
+        } else if (result.reason) {
+          totals.failures.push(`${url.slice(-40)}: ${result.reason}`);
+        }
+      } catch (error) {
+        totals.failures.push(`${url.slice(-40)}: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  return totals;
+}
+
 async function browserAttempt(store: DownloadStore, lookbackDays: number): Promise<RunTotals> {
   const downloads = new DownloadManager(store);
   const browser = await launchBrowser(downloads);
@@ -171,10 +244,26 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
 }
 
 export async function runDownload(store: DownloadStore, lookbackDays: number): Promise<RunDownloadResult> {
+  // Try direct-poll first — faster, no browser needed, no AI cost.
+  if (await isDirectPollAvailable()) {
+    console.log("Attempting direct HTTP poll (no browser)...");
+    try {
+      const totals = await directAttempt(store, lookbackDays);
+      if (totals.failures.length === 0 || totals.saved > 0) {
+        return { ...totals, transport: "direct" };
+      }
+      console.log(`Direct poll had ${totals.failures.length} failures — falling back to browser.`);
+    } catch (error) {
+      console.warn(`Direct poll failed: ${(error as Error).message} — falling back to browser.`);
+    }
+  }
+
+  // Fall back to browser-based download.
   let lastError: Error | undefined;
   for (let attemptNumber = 1; attemptNumber <= MAX_ATTEMPTS; attemptNumber += 1) {
     try {
-      return { ...(await browserAttempt(store, lookbackDays)), transport: "browser" };
+      const totals = await browserAttempt(store, lookbackDays);
+      return { ...totals, transport: attemptNumber > 1 ? "browser-fallback" : "browser" };
     } catch (error) {
       lastError = error as Error;
       console.error(`Attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${lastError.message}`);

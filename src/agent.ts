@@ -109,6 +109,12 @@ async function writeDebug(page: Page, step: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (config.aiMode === "none") {
+    console.error("AI agent mode is disabled (AI_MODE=none). Use 'npm run daily' for deterministic downloads.");
+    process.exitCode = 1;
+    return;
+  }
+
   const store = new DownloadStore(config.stateDir);
   await store.load();
   const downloads = new DownloadManager(store);

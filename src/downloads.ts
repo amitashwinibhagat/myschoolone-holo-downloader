@@ -101,6 +101,20 @@ export class DownloadManager {
     return this.fetchAndSave(page, { url, width: 0, height: 0, alt }, dateLabel);
   }
 
+  /**
+   * Save a pre-fetched buffer directly (used by the direct-poll HTTP path).
+   * Applies the same dedup + compression + file-naming logic as browser downloads.
+   */
+  async saveFromBuffer(
+    body: Buffer,
+    sourceUrl: string,
+    contentType: string,
+    suggestedName: string,
+    dateLabel?: string,
+  ): Promise<SaveResult> {
+    return this.saveBuffer(body, suggestedName, sourceUrl, contentType, dateLabel);
+  }
+
   private async fetchAndSave(page: Page, candidate: CandidateImage, dateLabel?: string): Promise<SaveResult> {
     if (candidate.url.startsWith("data:image/")) {
       const match = candidate.url.match(/^data:([^;,]+)(?:;charset=[^;,]+)?;base64,(.+)$/);

@@ -8,9 +8,11 @@
     "login": "tsx src/login.ts",
     "daily": "tsx src/daily.ts",
     "status": "tsx src/status.ts",
+    "summary": "tsx src/status.ts --summary",
     "agent": "tsx src/agent.ts",
     "scheduled": "tsx src/scheduled.ts",
     "capture": "tsx src/capture.ts",
+    "health": "tsx src/health.ts",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "install-browser": "playwright install chromium"
