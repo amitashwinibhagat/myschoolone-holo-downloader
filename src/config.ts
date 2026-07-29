@@ -22,13 +22,19 @@ function expandHome(input: string): string {
   return input;
 }
 
+const profileDir = path.resolve(expandHome(process.env.BROWSER_PROFILE_DIR?.trim() || ".browser-profile"));
+const stateDir = path.resolve(expandHome(process.env.STATE_DIR?.trim() || ".state"));
+
 export const config = {
   apiKey: required("HAI_API_KEY"),
   schoolUrl: required("SCHOOL_URL"),
   model: process.env.HOLO_MODEL?.trim() || "holo3-1-35b-a3b",
   downloadDir: path.resolve(expandHome(process.env.DOWNLOAD_DIR?.trim() || "~/Pictures/School Updates")),
-  profileDir: path.resolve(expandHome(process.env.BROWSER_PROFILE_DIR?.trim() || ".browser-profile")),
-  stateDir: path.resolve(expandHome(process.env.STATE_DIR?.trim() || ".state")),
+  profileDir,
+  stateDir,
+  debugDir: path.join(stateDir, "debug"),
+  sessionStatePath: path.join(stateDir, "browser-storage-state.json"),
+  directDiscoveryPath: path.join(stateDir, "daily-log-discovery.json"),
   // Prefer a real installed browser to avoid Cloudflare bot challenges.
   // Empty default = auto-detect (tries Chrome, then Edge, then bundled Chromium).
   // Set BROWSER_CHANNEL=chromium to force Playwright's bundled Chromium.
@@ -48,4 +54,5 @@ export const config = {
   // Telegram notifications (optional — falls back to macOS osascript).
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
+  healthcheckUrl: process.env.HEALTHCHECK_URL?.trim() || "",
 };

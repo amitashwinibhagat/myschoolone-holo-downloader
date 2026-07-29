@@ -10,6 +10,7 @@ import { launchBrowser, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
+import { acquireRunLock } from "./run-lock.js";
 
 const PROGRESS_FILE = path.join(config.stateDir, "backfill-progress.json");
 
@@ -236,16 +237,19 @@ async function main(): Promise<void> {
   const store = new DownloadStore(config.stateDir);
   await store.load();
   const downloads = new DownloadManager(store);
-  const browser = await launchBrowser(downloads);
-  const totals: Totals = { saved: 0, duplicates: 0, failures: [], monthsProcessed: 0 };
+  const lock = await acquireRunLock(config.stateDir, "manual", "manual");
+  if (!lock.acquired) throw new Error("Another downloader command is using the browser profile. Wait for it to finish.");
 
   try {
-    const page = browser.getPage();
-    await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await ensureLoggedIn(page);
-    const frame = await openPreviousYearLog(page);
+    const browser = await launchBrowser(downloads);
+    const totals: Totals = { saved: 0, duplicates: 0, failures: [], monthsProcessed: 0 };
+    try {
+      const page = browser.getPage();
+      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await ensureLoggedIn(page);
+      const frame = await openPreviousYearLog(page);
 
-    for (let i = startIndex; i < chunks.length; i += 1) {
+      for (let i = startIndex; i < chunks.length; i += 1) {
       const chunk = chunks[i];
       console.log(`\n[${chunk.label}] Searching ${chunk.start} → ${chunk.end} ...`);
 
@@ -275,26 +279,29 @@ async function main(): Promise<void> {
       totals.monthsProcessed += 1;
       await saveProgress(chunk.label);
       console.log(`[${chunk.label}] Done — running total: ${totals.saved} saved, ${totals.duplicates} dupes.`);
-    }
+      }
 
-    const summary =
+      const summary =
       `EY1 Backfill complete (${totals.monthsProcessed} months)\n` +
       `✓ ${totals.saved} new | ${totals.duplicates} duplicates | ${totals.failures.length} failed`;
-    console.log(`\n${summary}`);
-    if (totals.failures.length > 0) {
-      console.log("\nFailures:");
-      for (const f of totals.failures.slice(0, 30)) console.log(`  ! ${f}`);
-      if (totals.failures.length > 30) console.log(`  ... and ${totals.failures.length - 30} more`);
+      console.log(`\n${summary}`);
+      if (totals.failures.length > 0) {
+        console.log("\nFailures:");
+        for (const f of totals.failures.slice(0, 30)) console.log(`  ! ${f}`);
+        if (totals.failures.length > 30) console.log(`  ... and ${totals.failures.length - 30} more`);
+      }
+      await notify("EY1 Backfill", summary);
+    } catch (error) {
+      const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
+      await fs.mkdir(dir, { recursive: true });
+      await browser.getPage().screenshot({ path: path.join(dir, "backfill-failure.png") }).catch(() => undefined);
+      await notify("EY1 Backfill — INTERRUPTED", (error as Error).message.slice(0, 200));
+      throw error;
+    } finally {
+      await browser.context.close().catch(() => undefined);
     }
-    await notify("EY1 Backfill", summary);
-  } catch (error) {
-    const dir = path.resolve("debug");
-    await fs.mkdir(dir, { recursive: true });
-    await browser.getPage().screenshot({ path: path.join(dir, "backfill-failure.png") }).catch(() => undefined);
-    await notify("EY1 Backfill — INTERRUPTED", (error as Error).message.slice(0, 200));
-    throw error;
   } finally {
-    await browser.context.close().catch(() => undefined);
+    await lock.release();
   }
 }
 

@@ -6,6 +6,7 @@ import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { HoloClient } from "./holo.js";
 import { DownloadStore } from "./store.js";
+import { acquireRunLock } from "./run-lock.js";
 import { sleep } from "./utils.js";
 
 const SYSTEM_PROMPT = `You are a careful browser agent operating the MySchoolOne Pro parent portal for Amit.
@@ -111,60 +112,66 @@ async function main(): Promise<void> {
   const store = new DownloadStore(config.stateDir);
   await store.load();
   const downloads = new DownloadManager(store);
-  const browser = await launchBrowser(downloads);
-  const holo = new HoloClient();
+  const lock = await acquireRunLock(config.stateDir, "manual", "manual");
+  if (!lock.acquired) throw new Error("Another downloader command is using the browser profile. Wait for it to finish.");
 
   try {
-    let page = browser.getPage();
-    await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await waitForHumanCheck(page);
+    const browser = await launchBrowser(downloads);
+    const holo = new HoloClient();
+    try {
+      let page = browser.getPage();
+      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await waitForHumanCheck(page);
 
-    const messages: any[] = [{ role: "system", content: SYSTEM_PROMPT }];
+      const messages: any[] = [{ role: "system", content: SYSTEM_PROMPT }];
 
-    for (let step = 1; step <= config.maxSteps; step += 1) {
-      page = browser.getPage();
-      console.log(`\nStep ${step}/${config.maxSteps}: ${page.url()}`);
-      messages.push(await observation(page));
-      trimOldImages(messages, 3);
+      for (let step = 1; step <= config.maxSteps; step += 1) {
+        page = browser.getPage();
+        console.log(`\nStep ${step}/${config.maxSteps}: ${page.url()}`);
+        messages.push(await observation(page));
+        trimOldImages(messages, 3);
 
-      try {
-        const response = await holo.next(messages);
-        const assistant = response.choices[0]?.message;
-        const call = assistant?.tool_calls?.[0];
-        if (!call) throw new Error("Holo returned no tool call.");
+        try {
+          const response = await holo.next(messages);
+          const assistant = response.choices[0]?.message;
+          const call = assistant?.tool_calls?.[0];
+          if (!call) throw new Error("Holo returned no tool call.");
 
-        const name = call.function.name;
-        const args = JSON.parse(call.function.arguments || "{}");
-        console.log(`Holo → ${name}`, args);
+          const name = call.function.name;
+          const args = JSON.parse(call.function.arguments || "{}");
+          console.log(`Holo → ${name}`, args);
 
-        messages.push({
-          role: "assistant",
-          content: assistant.content || "",
-          tool_calls: assistant.tool_calls,
-        });
+          messages.push({
+            role: "assistant",
+            content: assistant.content || "",
+            tool_calls: assistant.tool_calls,
+          });
 
-        if (name === "finish") {
-          console.log(`\nFinished: ${args.summary}`);
-          await store.markSuccessfulRun();
-          return;
+          if (name === "finish") {
+            console.log(`\nFinished: ${args.summary}`);
+            await store.markSuccessfulRun();
+            return;
+          }
+
+          const result = await executeTool(name, args, page, downloads);
+          console.log(result);
+          messages.push({ role: "tool", tool_call_id: call.id, content: result });
+        } catch (error) {
+          console.error(`Step ${step} failed: ${(error as Error).message}`);
+          await writeDebug(page, step);
+          messages.push({
+            role: "user",
+            content: `<tool_error>${(error as Error).message}. Recover safely; do not repeat a failing action blindly.</tool_error>`,
+          });
         }
-
-        const result = await executeTool(name, args, page, downloads);
-        console.log(result);
-        messages.push({ role: "tool", tool_call_id: call.id, content: result });
-      } catch (error) {
-        console.error(`Step ${step} failed: ${(error as Error).message}`);
-        await writeDebug(page, step);
-        messages.push({
-          role: "user",
-          content: `<tool_error>${(error as Error).message}. Recover safely; do not repeat a failing action blindly.</tool_error>`,
-        });
       }
-    }
 
-    throw new Error(`Agent reached MAX_STEPS=${config.maxSteps} without finishing.`);
+      throw new Error(`Agent reached MAX_STEPS=${config.maxSteps} without finishing.`);
+    } finally {
+      await browser.context.close();
+    }
   } finally {
-    await browser.context.close();
+    await lock.release();
   }
 }
 

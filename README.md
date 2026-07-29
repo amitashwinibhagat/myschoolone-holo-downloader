@@ -75,13 +75,30 @@ Manually navigate to the troublesome page and press Enter. This creates a local 
 
 ## 6. Scheduling — only after manual runs work
 
-The included script installs a macOS LaunchAgent for 7:30 PM daily:
+The included script installs a macOS LaunchAgent that checks today's Daily Log
+every 10 minutes from 1:00 PM through 8:50 PM IST on weekdays, then performs a
+seven-day reconciliation at 9:00 PM:
 
 ```bash
 ./scripts/install-launch-agent.sh
 ```
 
-A scheduled GUI browser automation can fail when the Mac is asleep, locked, logged out, or Chromium lacks macOS permissions. Validate manual operation before enabling it.
+The scheduler uses an exclusive local lock, so manual runs and scheduled runs
+cannot share one browser profile. It records recent run results in the local
+state file; inspect them with:
+
+```bash
+npm run status
+```
+
+A scheduled GUI browser automation needs an active, unlocked macOS user
+session. For unattended recovery after a power failure, configure automatic
+login and `pmset autorestart 1`. Validate a manual operation before enabling it.
+
+Optional: configure `HEALTHCHECK_URL` with a Healthchecks.io ping URL. The
+scheduler pings it after the successful 9:00 PM reconciliation, so an external
+service can alert if the Mini stops running entirely. The ping contains no
+school content or credentials.
 
 ## Privacy
 
