@@ -28,7 +28,7 @@ export const config = {
   model: process.env.HOLO_MODEL?.trim() || "holo3-1-35b-a3b",
   downloadDir: path.resolve(expandHome(process.env.DOWNLOAD_DIR?.trim() || "~/Pictures/School Updates")),
   profileDir: path.resolve(expandHome(process.env.BROWSER_PROFILE_DIR?.trim() || ".browser-profile")),
-  stateDir: path.resolve(".state"),
+  stateDir: path.resolve(expandHome(process.env.STATE_DIR?.trim() || ".state")),
   // Prefer a real installed browser to avoid Cloudflare bot challenges.
   // Empty default = auto-detect (tries Chrome, then Edge, then bundled Chromium).
   // Set BROWSER_CHANNEL=chromium to force Playwright's bundled Chromium.

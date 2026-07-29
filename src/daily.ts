@@ -204,15 +204,8 @@ async function attempt(store: DownloadStore): Promise<RunTotals> {
 }
 
 async function main(): Promise<void> {
-  const force = process.argv.includes("--force");
   const store = new DownloadStore(config.stateDir);
   await store.load();
-
-  const lastRun = store.lastSuccessfulRunAt();
-  if (!force && lastRun && dateInIndia(new Date(lastRun)) === dateInIndia()) {
-    console.log("Already completed a successful run today — skipping. Use --force to re-run.");
-    return;
-  }
 
   let lastError: Error | undefined;
   for (let attemptNumber = 1; attemptNumber <= MAX_ATTEMPTS; attemptNumber += 1) {
