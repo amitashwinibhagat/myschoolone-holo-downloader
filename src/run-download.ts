@@ -249,10 +249,14 @@ export async function runDownload(store: DownloadStore, lookbackDays: number): P
     console.log("Attempting direct HTTP poll (no browser)...");
     try {
       const totals = await directAttempt(store, lookbackDays);
-      if (totals.failures.length === 0 || totals.saved > 0) {
+      // Only trust direct-poll if it found at least one attachment or had explicit
+      // failures. If every day returned 0 URLs the AJAX endpoint likely didn't work,
+      // so fall back to the browser to verify.
+      const anyUrlsFound = totals.daysChecked > 0 && (totals.saved > 0 || totals.duplicates > 0);
+      if (anyUrlsFound || totals.failures.length > 0) {
         return { ...totals, transport: "direct" };
       }
-      console.log(`Direct poll had ${totals.failures.length} failures — falling back to browser.`);
+      console.log("Direct poll found no attachments — falling back to browser to verify.");
     } catch (error) {
       console.warn(`Direct poll failed: ${(error as Error).message} — falling back to browser.`);
     }
