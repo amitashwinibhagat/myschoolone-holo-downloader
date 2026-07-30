@@ -148,6 +148,35 @@ test("DownloadStore: tracks consecutive failures", async () => {
   }
 });
 
+test("DownloadStore: accepts telegram-sourced runs", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
+  try {
+    const store = new DownloadStore(dir);
+    await store.load();
+
+    const run: RunRecord = {
+      startedAt: "2026-07-29T18:00:00Z",
+      finishedAt: "2026-07-29T18:01:00Z",
+      source: "telegram",
+      mode: "manual",
+      transport: "browser",
+      outcome: "success",
+      saved: 2,
+      duplicates: 1,
+      failures: 0,
+      daysChecked: 7,
+    };
+    await store.recordRun(run);
+
+    const data = store.snapshot();
+    assert.equal(data.runs?.length, 1);
+    assert.equal(data.runs![0].source, "telegram");
+    assert.equal(data.lastSuccessfulRunAt, "2026-07-29T18:01:00Z");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("DownloadStore: caps run history at 300", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
   try {

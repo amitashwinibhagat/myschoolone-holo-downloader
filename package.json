@@ -11,6 +11,7 @@
     "summary": "tsx src/status.ts --summary",
     "agent": "tsx src/agent.ts",
     "scheduled": "tsx src/scheduled.ts",
+    "telegram-bot": "tsx src/telegram-bot.ts",
     "capture": "tsx src/capture.ts",
     "health": "tsx src/health.ts",
     "check": "tsc --noEmit",

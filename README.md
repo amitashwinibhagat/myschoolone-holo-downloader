@@ -100,6 +100,39 @@ scheduler pings it after the successful 9:00 PM reconciliation, so an external
 service can alert if the Mini stops running entirely. The ping contains no
 school content or credentials.
 
+## 7. Telegram remote control
+
+If you want to start a run or check status from your phone, enable the optional
+Telegram bot.
+
+Set in `.env`:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=your-bot-token-from-at-telegram-dot-org
+TELEGRAM_CHAT_ID=your-chat-id
+```
+
+Run the bot in the foreground for testing:
+
+```bash
+npm run telegram-bot
+```
+
+Supported commands (only from the configured chat):
+
+- `/run` — Start a full photo download run (same as `npm run daily`).
+- `/status` — Show total photos, this week/month counts, last run, and next scheduled run.
+- `/help` — List commands.
+
+Install a LaunchAgent so the bot starts automatically and restarts if it exits:
+
+```bash
+./scripts/install-telegram-bot-launch-agent.sh
+```
+
+Only one downloader run can run at a time. If you send `/run` while another run
+is active, the bot replies that it is busy.
+
 ## Privacy
 
 Screenshots sent to Holo may contain school updates, names and photo thumbnails. The H Company API documentation states that its API uses zero data retention by default, but the screenshots still leave the Mac for inference. For stronger privacy, the same architecture can later point at a locally hosted Holo3.1 model.

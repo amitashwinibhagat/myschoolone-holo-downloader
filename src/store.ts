@@ -10,7 +10,7 @@ export interface DownloadRecord {
 }
 
 export type RunMode = "fast" | "reconcile" | "manual";
-export type RunSource = "scheduled" | "manual";
+export type RunSource = "scheduled" | "manual" | "telegram";
 export type RunTransport = "browser" | "direct" | "browser-fallback";
 export type RunOutcome = "success" | "failure" | "skipped_locked" | "off_hours";
 
