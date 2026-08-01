@@ -41,7 +41,9 @@ async function sendMessage(chatId: number, text: string): Promise<void> {
       text,
       parse_mode: "HTML",
     }),
-  }).catch(() => undefined);
+  }).catch((error) => {
+    console.error(`Failed to send Telegram message to ${chatId}: ${(error as Error).message}`);
+  });
 }
 
 async function getUpdates(offset: number): Promise<TelegramUpdate[]> {
@@ -110,10 +112,11 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
   if (!chatId || !text) return;
 
   if (String(chatId) !== config.telegramChatId) {
-    // Silently ignore unauthorized chats
+    console.log(`Ignoring update ${update.update_id} from unauthorized chat ${chatId}.`);
     return;
   }
 
+  console.log(`Received command from chat ${chatId}: ${text}`);
   const command = text.split(/\s+/)[0].toLowerCase();
 
   switch (command) {

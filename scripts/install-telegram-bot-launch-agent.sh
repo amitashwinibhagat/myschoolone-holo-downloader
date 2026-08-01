@@ -8,7 +8,7 @@ LABEL="com.amit.myschoolone-telegram-bot"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [ -f "$PROJECT_DIR/.env" ]; then
-  STATE_FROM_ENV="$(grep -E '^STATE_DIR=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '\"' | tr -d \"'")"
+  STATE_FROM_ENV="$(grep -E '^STATE_DIR=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
   STATE_FROM_ENV="${STATE_FROM_ENV/#\~/$HOME}"
 fi
 LOG_DIR="${STATE_FROM_ENV:-$HOME/.local/share/myschoolone-downloader/state}"
