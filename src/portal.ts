@@ -23,8 +23,10 @@ export function appFrame(page: Page): Frame {
 
 /**
  * Wait for any Cloudflare challenge to clear and, if a login form is showing,
- * sign in with autofilled credentials. Throws NeedsHumanLoginError when the
- * browser cannot complete the sign-in on its own.
+ * sign in automatically. Credentials come from SCHOOL_USERNAME/SCHOOL_PASSWORD
+ * in .env when set (fully automatic); otherwise the browser's autofilled
+ * values are used. Throws NeedsHumanLoginError when sign-in cannot be
+ * completed without a human.
  */
 export async function ensureLoggedIn(page: Page): Promise<void> {
   await waitForHumanCheck(page);
@@ -34,25 +36,60 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
   const robot = page.getByText("I'm not a robot");
   if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
 
-  const username = await page.locator("input").first().inputValue().catch(() => "");
-  if (!username) {
+  const usernameField = page.locator("#user_names");
+  const passwordField = page.locator("#password");
+  if ((await usernameField.count()) === 0 || (await passwordField.count()) === 0) {
     throw new NeedsHumanLoginError(
-      "Login form is showing but the browser did not autofill credentials. " +
-        "Run `npm run login`, sign in once and save the password.",
+      "Login form is showing but its username/password fields were not found. " +
+        "The portal layout may have changed — run `npm run login` manually.",
     );
   }
 
-  console.log("Login form detected — signing in with autofilled credentials...");
+  // Prefer explicit credentials from .env; fall back to whatever the browser
+  // autofilled into the real fields.
+  let username = config.schoolUsername;
+  let password = config.schoolPassword;
+  if (!username || !password) {
+    username = username || (await usernameField.inputValue().catch(() => ""));
+    password = password || (await passwordField.inputValue().catch(() => ""));
+  }
+  if (!username || !password) {
+    throw new NeedsHumanLoginError(
+      "Login form is showing but no credentials are available. Set " +
+        "SCHOOL_USERNAME and SCHOOL_PASSWORD in .env for automatic re-login, " +
+        "or run `npm run login` once.",
+    );
+  }
+
+  console.log("Login form detected — signing in automatically...");
+  await usernameField.fill(username);
+  await passwordField.fill(password);
+
+  // Tick the "I'm not a robot" checkbox (label toggles #imrobot) and verify.
   await robot.click();
-  await page.waitForTimeout(2_000);
-  await page.getByText("Sign In", { exact: true }).click();
-  await page.waitForTimeout(8_000);
-
-  if (await page.getByText("I'm not a robot").isVisible({ timeout: 2_000 }).catch(() => false)) {
-    throw new NeedsHumanLoginError(
-      "Automatic sign-in failed; the login form is still visible. Run `npm run login` manually.",
-    );
+  const robotChecked = await page
+    .locator("#imrobot")
+    .isChecked()
+    .catch(() => false);
+  if (!robotChecked) {
+    await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
   }
+
+  // The Sign In anchor calls login(), which RSA-encrypts the values and
+  // submits via AJAX. Click it and wait for the form to actually go away.
+  await page.getByText("Sign In", { exact: true }).click();
+
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(2_000);
+    const formStillVisible = await robot.isVisible({ timeout: 1_000 }).catch(() => false);
+    if (!formStillVisible) return; // signed in — form is gone
+  }
+
+  throw new NeedsHumanLoginError(
+    "Automatic sign-in failed; the login form is still visible. " +
+      "Check SCHOOL_USERNAME/SCHOOL_PASSWORD in .env, or run `npm run login` manually.",
+  );
 }
 
 /** Write a screenshot + page HTML snapshot for failure diagnostics. */

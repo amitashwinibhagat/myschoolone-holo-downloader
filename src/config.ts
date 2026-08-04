@@ -76,6 +76,12 @@ export const config = {
   // AI mode: "auto" uses the Holo agent for complex navigation, "none" forces
   // deterministic-only operation (no screenshots sent to external APIs).
   aiMode: enumValue("AI_MODE", "auto", ["auto", "none"] as const),
+  // Optional portal credentials for fully automatic re-login when the session
+  // expires. When set, the deterministic path can sign back in without
+  // depending on Chrome's (unreliable in automation) password autofill.
+  // Stored in plaintext in .env — only use on a trusted, single-user machine.
+  schoolUsername: process.env.SCHOOL_USERNAME?.trim() || "",
+  schoolPassword: process.env.SCHOOL_PASSWORD || "",
   // Direct HTTP poll: set to false when the portal's AJAX endpoints are behind
   // a Cloudflare challenge that raw requests cannot pass (the downloader then
   // always uses the browser, which is the current default behaviour anyway).

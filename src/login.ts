@@ -1,11 +1,45 @@
 import readline from "node:readline/promises";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { launchBrowser, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
+
+/** Escape a value for dotenv double-quoted syntax. */
+function dotenvQuote(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * After a successful manual login, read the credentials from the filled login
+ * fields and persist them to .env so future session expiries can be handled
+ * automatically (without relying on Chrome's flaky autofill). Skipped when
+ * SCHOOL_USERNAME/SCHOOL_PASSWORD are already configured.
+ */
+async function saveCredentialsFromBrowser(page: import("playwright").Page): Promise<void> {
+  if (config.schoolUsername && config.schoolPassword) return;
+  const envPath = path.resolve(".env");
+  const existing = await fs.readFile(envPath, "utf8").catch(() => "");
+  if (/^SCHOOL_USERNAME=/m.test(existing) || /^SCHOOL_PASSWORD=/m.test(existing)) return;
+
+  const username = await page.locator("#user_names").inputValue().catch(() => "");
+  const password = await page.locator("#password").inputValue().catch(() => "");
+  if (!username || !password) return;
+
+  const lines = [
+    "",
+    "# Auto-saved by `npm run login` for automatic re-login. Plaintext — keep .env private.",
+    `SCHOOL_USERNAME=${dotenvQuote(username)}`,
+    `SCHOOL_PASSWORD=${dotenvQuote(password)}`,
+    "",
+  ];
+  await fs.appendFile(envPath, lines.join("\n"));
+  await fs.chmod(envPath, 0o600).catch(() => undefined);
+  console.log("Saved SCHOOL_USERNAME/SCHOOL_PASSWORD to .env for automatic re-login.");
+}
 
 async function main(): Promise<void> {
   const store = new DownloadStore(config.stateDir);
@@ -25,6 +59,8 @@ async function main(): Promise<void> {
       const terminal = readline.createInterface({ input, output });
       await terminal.question("\nPress Enter here after the dashboard is fully visible...");
       terminal.close();
+
+      await saveCredentialsFromBrowser(page);
 
       await fs.mkdir(config.stateDir, { recursive: true });
       await browser.context.storageState({ path: config.sessionStatePath });
