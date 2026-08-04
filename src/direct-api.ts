@@ -7,21 +7,58 @@
  *
  * Strategy:
  * 1. Load cookies from the saved Playwright storage state
- * 2. Fetch the Daily Log page HTML
- * 3. Extract the AJAX endpoint pattern from the page's JavaScript
- * 4. Call the endpoint for each date to get attachment URLs
- * 5. Download attachments directly via HTTP
+ * 2. Load the AJAX request structure captured by the last browser run
+ *    (`daily-log-discovery.json`), which records the real endpoint and
+ *    body parameter names/values (e.g. daily_planner_parent_ajax.php with
+ *    `tdate` + `type`).
+ * 3. Replay that request for each date to get attachment URLs
+ * 4. Download attachments directly via HTTP
+ * 5. Fall back to the legacy `dailydate=` POST only when no discovery data
+ *    exists yet.
  */
 import fs from "node:fs/promises";
 import { config } from "./config.js";
 import { dateInIndia } from "./utils.js";
+import {
+  loadDiscoveryFile,
+  DATE_VALUE_PATTERN,
+  type DiscoveredRequest,
+  type DiscoveryFile,
+  type RequestParameter,
+} from "./direct-discovery.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
 const DAILY_LOG_PATH = "/Web/LearningManagement/daily_planner_parent.php";
+const FRESH_DISCOVERY_MS = 3 * 86_400_000;
+/** Alternate `type` values to probe when the captured request returns no URLs. */
+const PROBE_TYPE_VALUES = ["1", "2", "daily"];
+/**
+ * Shared UA for all direct HTTP requests. Keep in sync with the browser
+ * channel's UA so Cloudflare sees one consistent fingerprint.
+ */
+export const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 export interface DirectPollResult {
   urls: string[];
   dateLabel: string;
+  /** Set when the fetch itself failed for this date (endpoint/session problem). */
+  error?: string;
+}
+
+export interface DirectPollOutcome {
+  results: DirectPollResult[];
+  /** Whether the direct call was driven by a captured discovery file. */
+  discoveryUsed: boolean;
+  /** Whether the discovery file was captured recently (fresh = trustworthy). */
+  discoveryFresh: boolean;
+  /**
+   * Whether the discovery captured real parameter values. Legacy files only
+   * recorded parameter names (empty values), which are not strong enough
+   * evidence to trust a zero-result reply.
+   */
+  discoveryComplete: boolean;
 }
 
 interface Cookie {
@@ -46,7 +83,7 @@ interface StorageState {
 /**
  * Load cookies from the Playwright storage state file saved by `npm run login`.
  */
-async function loadCookies(): Promise<Cookie[]> {
+export async function loadCookies(): Promise<Cookie[]> {
   const statePath = config.sessionStatePath;
   try {
     const raw = await fs.readFile(statePath, "utf8");
@@ -61,10 +98,18 @@ async function loadCookies(): Promise<Cookie[]> {
   }
 }
 
+/** True when any saved cookie expires within the given horizon (ms). */
+export async function sessionExpiresWithin(horizonMs: number): Promise<boolean> {
+  const cookies = await loadCookies();
+  const deadline = Date.now() + horizonMs;
+  return cookies.some((c) => typeof c.expires === "number" && c.expires > 0 && c.expires * 1000 < deadline);
+}
+
 /**
  * Convert Playwright storage-state cookies into a Cookie header string.
+ * Exported so the session check can reuse the same domain/path matching.
  */
-function cookieHeader(cookies: Cookie[], url: URL): string {
+export function buildCookieHeader(cookies: Cookie[], url: URL): string {
   const origin = url.origin;
   return cookies
     .filter((c) => {
@@ -75,50 +120,49 @@ function cookieHeader(cookies: Cookie[], url: URL): string {
     .join("; ");
 }
 
-/**
- * Build form-encoded body for the displaysubjects() AJAX call.
- * The portal uses a date parameter in DD/MM/YYYY format.
- */
-function buildDateRequestBody(portalDate: string): string {
-  return new URLSearchParams({ dailydate: portalDate }).toString();
+/** True when a captured parameter should carry the target portal date. */
+function isDateParameter(name: string, value: string): boolean {
+  return DATE_VALUE_PATTERN.test(value) || /date/i.test(name);
 }
 
 /**
- * Fetch the Daily Log page and extract attachment URLs from the HTML.
+ * Substitute the target portal date into a captured parameter list. A parameter
+ * is treated as the date field when its captured value looks like a date, or
+ * when its name clearly indicates a date (e.g. `tdate`, `dailydate`). All other
+ * captured values (e.g. `type`) are preserved so the replay matches what the
+ * browser actually sent.
  */
-async function fetchDailyLogHtml(cookies: Cookie[], date: string): Promise<string> {
-  const baseUrl = new URL(config.schoolUrl);
-  const url = new URL(DAILY_LOG_PATH, baseUrl);
-  const headers: Record<string, string> = {
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9",
-    Referer: baseUrl.toString(),
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-  };
-
-  const cookieStr = cookieHeader(cookies, url);
-  if (cookieStr) headers.Cookie = cookieStr;
-
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers,
-    redirect: "follow",
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} fetching Daily Log page`);
+export function replayBody(parameters: RequestParameter[], portalDate: string): string {
+  const params = new URLSearchParams();
+  let foundDate = false;
+  for (const { name, value } of parameters) {
+    if (isDateParameter(name, value)) {
+      params.set(name, portalDate);
+      foundDate = true;
+    } else {
+      params.set(name, value);
+    }
   }
+  if (!foundDate) params.set("dailydate", portalDate);
+  return params.toString();
+}
 
-  return response.text();
+function replayQuery(parameters: RequestParameter[], portalDate: string): string {
+  if (parameters.length === 0) return "";
+  const params = new URLSearchParams();
+  for (const { name, value } of parameters) {
+    if (!value) continue; // legacy files carry names without values
+    params.set(name, isDateParameter(name, value) ? portalDate : value);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
 /**
  * Parse HTML for attachment URLs matching the UploadFiles pattern.
  * Extracts both <a href="...UploadFiles..."> links and <img src="..."> with upload paths.
  */
-function extractAttachmentUrls(html: string): string[] {
+export function extractAttachmentUrls(html: string): string[] {
   const urls = new Set<string>();
 
   // Match href and src attributes containing UploadFiles paths
@@ -137,36 +181,15 @@ function extractAttachmentUrls(html: string): string[] {
 }
 
 /**
- * Try to discover the AJAX endpoint from inline JavaScript in the page.
- * The portal typically has a displaysubjects(date) function that calls an endpoint.
+ * POST to the given portal path with the given body and extract attachment
+ * URLs from the response (HTML or JSON).
  */
-function extractAjaxEndpoint(html: string): string | null {
-  // Look for AJAX/fetch calls in the page's JavaScript
-  const patterns = [
-    /ajax\s*\(\s*\{[^}]*url\s*:\s*["']([^"']+)["']/i,
-    /fetch\s*\(\s*["']([^"']+)["']/i,
-    /\.post\s*\(\s*["']([^"']+)["']/i,
-    /\.get\s*\(\s*["']([^"']+)["']/i,
-    /url\s*:\s*["']([^"']*daily[^"']*)["']/i,
-    /url\s*:\s*["']([^"']*planner[^"']*)["']/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) return match[1];
-  }
-
-  return null;
-}
-
-/**
- * Attempt to fetch daily log data via the discovered AJAX endpoint.
- * Falls back to parsing the initial page HTML if no AJAX endpoint is found.
- */
-async function fetchAttachmentsForDate(
+async function postAndExtract(
   cookies: Cookie[],
   baseUrl: URL,
-  portalDate: string,
+  path: string,
+  query: string,
+  body: string,
   isoDate: string,
 ): Promise<DirectPollResult> {
   const headers: Record<string, string> = {
@@ -175,19 +198,18 @@ async function fetchAttachmentsForDate(
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "X-Requested-With": "XMLHttpRequest",
     Referer: new URL(DAILY_LOG_PATH, baseUrl).toString(),
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "User-Agent": DEFAULT_USER_AGENT,
   };
 
-  const cookieStr = cookieHeader(cookies, baseUrl);
+  const cookieStr = buildCookieHeader(cookies, baseUrl);
   if (cookieStr) headers.Cookie = cookieStr;
 
-  const body = buildDateRequestBody(portalDate);
+  const resolved = new URL(`${path}${query}`, baseUrl);
+  if (resolved.origin !== baseUrl.origin) {
+    throw new Error(`Refusing to POST to off-origin endpoint: ${resolved.origin}`);
+  }
 
-  // Try the same page as an AJAX endpoint (common pattern for PHP portals)
-  const ajaxUrl = new URL(DAILY_LOG_PATH, baseUrl);
-  const response = await fetch(ajaxUrl.toString(), {
+  const response = await fetch(resolved.toString(), {
     method: "POST",
     headers,
     body,
@@ -195,19 +217,16 @@ async function fetchAttachmentsForDate(
   });
 
   if (!response.ok) {
-    return { urls: [], dateLabel: isoDate };
+    throw new Error(`HTTP ${response.status} fetching daily log data`);
   }
 
   const contentType = response.headers.get("content-type") || "";
   const text = await response.text();
 
-  // If it returned HTML, parse it for attachment URLs
   if (contentType.includes("text/html") || text.includes("<")) {
-    const urls = extractAttachmentUrls(text);
-    return { urls, dateLabel: isoDate };
+    return { urls: extractAttachmentUrls(text), dateLabel: isoDate };
   }
 
-  // If it returned JSON, try to extract URLs from the response
   try {
     const json = JSON.parse(text);
     const urls: string[] = [];
@@ -223,7 +242,6 @@ async function fetchAttachmentsForDate(
     extractUrls(json);
     return { urls, dateLabel: isoDate };
   } catch {
-    // Not JSON — try regex extraction on the raw text
     return { urls: extractAttachmentUrls(text), dateLabel: isoDate };
   }
 }
@@ -247,12 +265,10 @@ export async function fetchAttachmentBuffer(
     Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     "Accept-Language": "en-IN,en;q=0.9",
     Referer: new URL(DAILY_LOG_PATH, config.schoolUrl).toString(),
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "User-Agent": DEFAULT_USER_AGENT,
   };
 
-  const cookieStr = cookieHeader(cookies, targetUrl);
+  const cookieStr = buildCookieHeader(cookies, targetUrl);
   if (cookieStr) headers.Cookie = cookieStr;
 
   const response = await fetch(targetUrl.toString(), {
@@ -268,35 +284,154 @@ export async function fetchAttachmentBuffer(
   return { buffer: Buffer.from(arrayBuffer), contentType };
 }
 
+/** Resolve the correct `type` value by probing when the captured one returns nothing. */
+async function resolveParameters(
+  cookies: Cookie[],
+  baseUrl: URL,
+  path: string,
+  query: string,
+  parameters: RequestParameter[],
+  portalDate: string,
+  isoDate: string,
+): Promise<RequestParameter[] | null> {
+  const typeIndex = parameters.findIndex((p) => p.name === "type");
+  if (typeIndex < 0) return null;
+  for (const value of PROBE_TYPE_VALUES) {
+    if (parameters[typeIndex].value === value) continue;
+    const candidate = parameters.map((p, i) => (i === typeIndex ? { ...p, value } : p));
+    const result = await postAndExtract(
+      cookies,
+      baseUrl,
+      path,
+      query,
+      replayBody(candidate, portalDate),
+      isoDate,
+    ).catch(() => ({ urls: [], dateLabel: isoDate }));
+    if (result.urls.length > 0) return candidate;
+  }
+  return null;
+}
+
 /**
  * High-level entry point: poll the portal for attachment URLs across the given
  * date range using direct HTTP requests (no browser).
  *
- * Returns discovered attachment URLs grouped by date.
+ * Returns discovered attachment URLs grouped by date, plus metadata about
+ * whether a captured discovery file drove the requests and how fresh it is.
  */
-export async function directPollAttachments(
-  lookbackDays: number,
-): Promise<DirectPollResult[]> {
+export async function directPollAttachments(lookbackDays: number): Promise<DirectPollOutcome> {
   const cookies = await loadCookies();
   const baseUrl = new URL(config.schoolUrl);
+
+  const discoveryFile = await loadDiscoveryFile();
+  const discovery = pickEndpoint(discoveryFile);
+  const plan: { path: string; queryParameters: RequestParameter[]; parameters: RequestParameter[] } =
+    discovery
+      ? {
+          path: discovery.path,
+          queryParameters: discovery.queryParameters,
+          parameters: discovery.bodyParameters,
+        }
+      : {
+          path: DAILY_LOG_PATH,
+          queryParameters: [],
+          parameters: [{ name: "dailydate", value: "01/01/2000" }],
+        };
+
   const results: DirectPollResult[] = [];
+  let effectiveParameters = plan.parameters;
+  let resolved = false;
 
   for (let daysAgo = 0; daysAgo < lookbackDays; daysAgo += 1) {
     const iso = dateInIndia(new Date(Date.now() - daysAgo * 86_400_000));
     const [year, month, day] = iso.split("-");
     const portalDate = `${day}/${month}/${year}`;
+    const query = replayQuery(plan.queryParameters, portalDate);
 
     try {
-      const result = await fetchAttachmentsForDate(cookies, baseUrl, portalDate, iso);
-      console.log(`[direct] ${iso}: ${result.urls.length} attachment link(s).`);
-      results.push(result);
+      let result = await postAndExtract(
+        cookies,
+        baseUrl,
+        plan.path,
+        query,
+        replayBody(effectiveParameters, portalDate),
+        iso,
+      ).catch((error) => ({ urls: [], dateLabel: iso, error: (error as Error).message }));
+
+      if (!resolved) {
+        resolved = true;
+        // First day: if the captured/default request fails or returns nothing,
+        // probe alternate `type` values. A working variant is then used for all
+        // remaining days.
+        if (result.urls.length === 0) {
+          const variant = await resolveParameters(
+            cookies,
+            baseUrl,
+            plan.path,
+            query,
+            effectiveParameters,
+            portalDate,
+            iso,
+          );
+          if (variant) {
+            effectiveParameters = variant;
+            result = await postAndExtract(
+              cookies,
+              baseUrl,
+              plan.path,
+              query,
+              replayBody(effectiveParameters, portalDate),
+              iso,
+            ).catch((error) => ({ urls: [], dateLabel: iso, error: (error as Error).message }));
+          }
+        }
+      }
+
+      if (result.error) {
+        console.warn(`[direct] ${iso}: failed — ${result.error}`);
+        results.push(result);
+      } else {
+        console.log(`[direct] ${iso}: ${result.urls.length} attachment link(s).`);
+        results.push(result);
+      }
     } catch (error) {
       console.warn(`[direct] ${iso}: failed — ${(error as Error).message}`);
-      results.push({ urls: [], dateLabel: iso });
+      results.push({ urls: [], dateLabel: iso, error: (error as Error).message });
     }
   }
 
-  return results;
+  return {
+    results,
+    discoveryUsed: Boolean(discovery),
+    discoveryFresh: discoveryFresh(discoveryFile),
+    discoveryComplete: discovery
+      ? discovery.bodyParameters.length > 0 && discovery.bodyParameters.every((p) => p.value !== "")
+      : false,
+  };
+}
+
+function pickEndpoint(file: DiscoveryFile | null): DiscoveredRequest | null {
+  if (!file || !Array.isArray(file.requests)) return null;
+  // A protocol-relative path (//host/...) would make `new URL(path, baseUrl)`
+  // resolve off-origin while the cookie header is still built for the school
+  // origin — reject it.
+  const posts = file.requests.filter(
+    (r) => r.method === "POST" && r.path.startsWith("/") && !r.path.startsWith("//"),
+  );
+  posts.sort((a, b) => {
+    const aHasDate = a.bodyParameters.some((p) => DATE_VALUE_PATTERN.test(p.value)) ? 1 : 0;
+    const bHasDate = b.bodyParameters.some((p) => DATE_VALUE_PATTERN.test(p.value)) ? 1 : 0;
+    return bHasDate - aHasDate || b.bodyParameters.length - a.bodyParameters.length;
+  });
+  return posts[0] ?? null;
+}
+export { pickEndpoint };
+
+function discoveryFresh(file: DiscoveryFile | null): boolean {
+  if (!file) return false;
+  const capturedAt = Date.parse(file.capturedAt);
+  if (Number.isNaN(capturedAt)) return false;
+  return Date.now() - capturedAt < FRESH_DISCOVERY_MS;
 }
 
 /**

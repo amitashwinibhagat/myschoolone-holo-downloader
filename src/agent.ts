@@ -5,8 +5,10 @@ import { launchBrowser, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { HoloClient } from "./holo.js";
-import { DownloadStore } from "./store.js";
+import { DownloadStore, type RunRecord } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
+import { notify } from "./notify.js";
+import { logInfo, logWarn, logError } from "./log.js";
 import { sleep } from "./utils.js";
 
 const SYSTEM_PROMPT = `You are a careful browser agent operating the MySchoolOne Pro parent portal for Amit.
@@ -110,16 +112,21 @@ async function writeDebug(page: Page, step: number): Promise<void> {
 
 async function main(): Promise<void> {
   if (config.aiMode === "none") {
-    console.error("AI agent mode is disabled (AI_MODE=none). Use 'npm run daily' for deterministic downloads.");
+    logError("AI agent mode is disabled (AI_MODE=none). Use 'npm run daily' for deterministic downloads.");
     process.exitCode = 1;
     return;
   }
 
+  const startedAt = new Date().toISOString();
   const store = new DownloadStore(config.stateDir);
   await store.load();
   const downloads = new DownloadManager(store);
   const lock = await acquireRunLock(config.stateDir, "manual", "manual");
-  if (!lock.acquired) throw new Error("Another downloader command is using the browser profile. Wait for it to finish.");
+  if (!lock.acquired) {
+    const message = "Another downloader command is using the browser profile. Wait for it to finish.";
+    logWarn(message);
+    throw new Error(message);
+  }
 
   try {
     const browser = await launchBrowser(downloads);
@@ -133,7 +140,7 @@ async function main(): Promise<void> {
 
       for (let step = 1; step <= config.maxSteps; step += 1) {
         page = browser.getPage();
-        console.log(`\nStep ${step}/${config.maxSteps}: ${page.url()}`);
+        logInfo(`Step ${step}/${config.maxSteps}: ${page.url()}`);
         messages.push(await observation(page));
         trimOldImages(messages, 3);
 
@@ -145,7 +152,7 @@ async function main(): Promise<void> {
 
           const name = call.function.name;
           const args = JSON.parse(call.function.arguments || "{}");
-          console.log(`Holo → ${name}`, args);
+          logInfo(`Holo → ${name} ${JSON.stringify(args)}`);
 
           messages.push({
             role: "assistant",
@@ -154,16 +161,25 @@ async function main(): Promise<void> {
           });
 
           if (name === "finish") {
-            console.log(`\nFinished: ${args.summary}`);
+            logInfo(`Finished: ${args.summary}`);
+            await downloads.flush();
             await store.markSuccessfulRun();
+            const stats = downloads.stats();
+            await recordAgentRun(store, startedAt, {
+              outcome: "success",
+              message: args.summary || "Agent finished.",
+              saved: stats.saved,
+              duplicates: stats.duplicates,
+            });
+            if (stats.saved > 0) await notify("School photos", `${stats.saved} new photo(s) saved by agent.`);
             return;
           }
 
           const result = await executeTool(name, args, page, downloads);
-          console.log(result);
+          logInfo(result);
           messages.push({ role: "tool", tool_call_id: call.id, content: result });
         } catch (error) {
-          console.error(`Step ${step} failed: ${(error as Error).message}`);
+          logError(`Step ${step} failed: ${(error as Error).message}`);
           await writeDebug(page, step);
           messages.push({
             role: "user",
@@ -176,12 +192,39 @@ async function main(): Promise<void> {
     } finally {
       await browser.context.close();
     }
+  } catch (error) {
+    // Record the failed run so /status and failure streaks reflect it.
+    await downloads.flush();
+    await recordAgentRun(store, startedAt, { outcome: "failure", message: (error as Error).message });
+    throw error;
   } finally {
     await lock.release();
   }
 }
 
-main().catch((error) => {
-  console.error(`\nFatal error: ${(error as Error).stack || (error as Error).message}`);
+async function recordAgentRun(
+  store: DownloadStore,
+  startedAt: string,
+  info: { outcome: "success" | "failure"; message: string; saved?: number; duplicates?: number },
+): Promise<void> {
+  const record: RunRecord = {
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    source: "manual",
+    mode: "agent",
+    transport: "browser",
+    outcome: info.outcome,
+    saved: info.saved ?? 0,
+    duplicates: info.duplicates ?? 0,
+    failures: info.outcome === "failure" ? 1 : 0,
+    daysChecked: 0,
+    error: info.outcome === "failure" ? info.message : undefined,
+  };
+  await store.recordRun(record);
+}
+
+main().catch(async (error) => {
+  logError(`\nFatal error: ${(error as Error).stack || (error as Error).message}`);
+  await notify("School photos — agent FAILED", (error as Error).message.slice(0, 180));
   process.exitCode = 1;
 });

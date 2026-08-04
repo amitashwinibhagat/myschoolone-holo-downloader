@@ -3,8 +3,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { acquireRunLock } from "../src/run-lock.js";
-import { runJob } from "../src/run-job.js";
+
+// run-job imports config, so env must be present before the module loads
+// (CI has no .env file).
+process.env.HAI_API_KEY = "test-key";
+process.env.SCHOOL_URL = "https://school.example.com";
+process.env.STATE_DIR = "";
+
+const { acquireRunLock } = await import("../src/run-lock.js");
+const { runJob } = await import("../src/run-job.js");
 
 test("runJob: records skipped_locked when another run holds the lock", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-runjob-"));

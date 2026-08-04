@@ -32,6 +32,18 @@ async function readMetadata(filePath: string): Promise<LockMetadata | undefined>
   }
 }
 
+/**
+ * Quick check whether a downloader run currently owns the browser profile.
+ * Stale locks owned by dead processes count as free (the next run will clean
+ * them up during acquisition).
+ */
+export async function isRunLockHeld(stateDir: string): Promise<boolean> {
+  const metadataPath = path.join(stateDir, "run.lock", "owner.json");
+  const owner = await readMetadata(metadataPath);
+  if (!owner) return false;
+  return processIsAlive(owner.pid);
+}
+
 export async function acquireRunLock(stateDir: string, mode: RunMode, source: RunSource): Promise<RunLock> {
   const lockDir = path.join(stateDir, "run.lock");
   const metadataPath = path.join(lockDir, "owner.json");

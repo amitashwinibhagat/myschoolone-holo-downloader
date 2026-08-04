@@ -1,8 +1,10 @@
 import { config } from "./config.js";
 import { pingHealthcheck, notify } from "./notify.js";
 import { runJob } from "./run-job.js";
+import { runHealthCheck } from "./health.js";
+import { logInfo, logWarn, logError, pruneDebugDirs } from "./log.js";
 import { indiaTime } from "./utils.js";
-import { modeForClock } from "./schedule-window.js";
+import { modeForClock, nextRunInfo } from "./schedule-window.js";
 
 function isWeekday(): boolean {
   return indiaTime().weekday >= 1 && indiaTime().weekday <= 5;
@@ -20,14 +22,14 @@ async function main(): Promise<void> {
   const clock = indiaTime();
 
   if (!isWeekday()) {
-    console.log("Weekend — skipping.");
+    logInfo("Weekend — skipping.");
     return;
   }
 
   // Use the schedule-window to determine the run mode
   const mode = modeForClock(clock);
   if (!mode && !force) {
-    console.log(`Outside schedule window (hour=${clock.hour}) — skipping. Use --force to override.`);
+    logInfo(`Outside schedule window (hour=${clock.hour}) — skipping. Use --force to override.`);
     return;
   }
 
@@ -35,50 +37,75 @@ async function main(): Promise<void> {
   const lookbackDays = lookbackForMode(effectiveMode);
 
   if (dryRun) {
-    console.log(`Dry run: weekday, mode=${effectiveMode}, ${lookbackDays}-day lookback, ai=${config.aiMode}.`);
+    logInfo(`Dry run: weekday, mode=${effectiveMode}, ${lookbackDays}-day lookback, ai=${config.aiMode}.`);
     return;
   }
 
-  const { record, result, skipped, lockOwner, error } = await runJob({
+  const { record, result, skipped, lockOwner, error, consecutiveFailures } = await runJob({
     source: "scheduled",
     mode: effectiveMode,
     lookbackDays,
   });
 
+  await pruneDebugDirs().catch(() => undefined);
+
   if (skipped) {
-    console.log(`Locked by ${lockOwner?.mode} run from ${lockOwner?.startedAt}. Skipping.`);
+    logWarn(`Locked by ${lockOwner?.mode} run from ${lockOwner?.startedAt}. Skipping.`);
     return;
   }
 
   if (result) {
-    console.log(`${record.outcome}: ${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed.`);
+    logInfo(`${record.outcome}: ${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed.`);
 
     // Richer notification with transport and next-run hint
-    const nextRun = isWeekday() && clock.hour < 15
-      ? "today 3PM"
-      : isWeekday() && clock.hour < 21
-        ? "today 9PM"
-        : "next weekday 3PM";
     const notifLines = [
       `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed`,
       `${result.daysChecked} day(s) via ${result.transport} (${effectiveMode} mode)`,
-      `Next run: ${nextRun} IST`,
+      `Next run: ${nextRunInfo(clock)}`,
     ];
     if (result.saved > 0) await notify("School photos", `${result.saved} new photo(s) saved.`);
     await notify("School photos — daily summary", notifLines.join("\n"));
     await pingHealthcheck("success");
+
+    // Best-effort portal fingerprint check (skipped silently when the browser
+    // lock is held). Only runs on the 9PM reconcile to avoid a second browser
+    // launch after every 3PM fast run. Confirmed changes are notified by
+    // runHealthCheck.
+    if (effectiveMode === "reconcile") {
+      try {
+        const health = await runHealthCheck();
+        if (health.changed) logWarn(`Health check: ${health.message}`);
+        else logInfo(`Health check: ${health.message}`);
+      } catch (error) {
+        logWarn(`Health check failed: ${(error as Error).message}`);
+      }
+    }
     return;
   }
 
   // Failure
   const message = error?.message || "Download failed without an error message.";
-  console.error(`Failed: ${message}`);
-  await notify("School photos — FAILED", message.slice(0, 180));
+  logError(`Failed: ${message}`);
+  if (record.outcome === "needs_login") {
+    await notify(
+      "School photos — LOGIN REQUIRED",
+      `The portal session is expired and the browser cannot sign in automatically.\nRun \`npm run login\` to restore it.\n${message.slice(0, 160)}`,
+    );
+  } else {
+    await notify("School photos — FAILED", message.slice(0, 180));
+    if ((consecutiveFailures ?? 0) >= 3) {
+      logWarn(`Failure streak reached ${consecutiveFailures} — escalating to the user.`);
+      await notify(
+        "School photos — ACTION NEEDED",
+        "Multiple consecutive failures. Recovery steps:\n1. npm run login\n2. npm run health\n3. npm run status",
+      );
+    }
+  }
   await pingHealthcheck("fail");
   throw error || new Error(message);
 }
 
 main().catch((error) => {
-  console.error(`\nFatal scheduled error: ${(error as Error).stack || (error as Error).message}`);
+  logError(`\nFatal scheduled error: ${(error as Error).stack || (error as Error).message}`);
   process.exitCode = 1;
 });

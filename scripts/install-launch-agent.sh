@@ -20,12 +20,41 @@ fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 
-CALENDAR_ENTRIES=""
-for HOUR_MIN in 15:0 21:0; do
-  HOUR="${HOUR_MIN%%:*}"
-  MINUTE="${HOUR_MIN##*:}"
-  CALENDAR_ENTRIES+="    <dict>\n      <key>Hour</key><integer>${HOUR}</integer>\n      <key>Minute</key><integer>${MINUTE}</integer>\n    </dict>\n"
-done
+# Single source of truth for schedule times: src/schedule-window.ts.
+CALENDAR_ENTRIES="$(
+  cd "$PROJECT_DIR" \
+  && "$NODE_BIN" --import tsx --input-type=module -e '
+    import { schedulerCalendarTimes } from "./src/schedule-window.ts";
+    process.stdout.write(
+      schedulerCalendarTimes()
+        .map((t) => `    <dict>\n      <key>Hour</key><integer>${t.hour}</integer>\n      <key>Minute</key><integer>${t.minute}</integer>\n    </dict>`)
+        .join("\n") + "\n",
+    );
+  ' 2>/dev/null
+)"
+SCHEDULE_LABEL="$(
+  cd "$PROJECT_DIR" \
+  && "$NODE_BIN" --import tsx --input-type=module -e '
+    import { schedulerCalendarTimes } from "./src/schedule-window.ts";
+    process.stdout.write(
+      schedulerCalendarTimes()
+        .map((t) => `${t.hour}:${String(t.minute).padStart(2, "0")}`)
+        .join(" and "),
+    );
+  ' 2>/dev/null
+)"
+if [ -z "$CALENDAR_ENTRIES" ]; then
+  echo "Warning: could not read schedule times from src/schedule-window.ts; using defaults 15:00 and 21:00." >&2
+  CALENDAR_ENTRIES='    <dict>
+      <key>Hour</key><integer>15</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key><integer>21</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>'
+  SCHEDULE_LABEL="15:00 and 21:00"
+fi
 
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,7 +89,8 @@ plutil -lint "$PLIST"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
-echo "Installed ${LABEL}: 15:00 and 21:00 IST on weekdays (2 calendar triggers)."
+TRIGGER_COUNT="$(printf '%s' "$CALENDAR_ENTRIES" | grep -c '<dict>')"
+echo "Installed ${LABEL}: ${SCHEDULE_LABEL} IST on weekdays (${TRIGGER_COUNT} calendar triggers)."
 echo "RunAtLoad is enabled for weekday-window catch-up after login/reboot."
 echo "Logs: $LOG_DIR/launchd.out.log and $LOG_DIR/launchd.err.log"
 echo "If the Mini might sleep, wake it five minutes before the window:"

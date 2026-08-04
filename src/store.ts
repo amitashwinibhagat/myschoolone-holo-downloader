@@ -9,10 +9,10 @@ export interface DownloadRecord {
   downloadedAt: string;
 }
 
-export type RunMode = "fast" | "reconcile" | "manual";
+export type RunMode = "fast" | "reconcile" | "manual" | "agent";
 export type RunSource = "scheduled" | "manual" | "telegram";
 export type RunTransport = "browser" | "direct" | "browser-fallback";
-export type RunOutcome = "success" | "failure" | "skipped_locked" | "off_hours";
+export type RunOutcome = "success" | "failure" | "skipped_locked" | "off_hours" | "needs_login";
 
 export interface RunRecord {
   startedAt: string;
@@ -29,6 +29,7 @@ export interface RunRecord {
 }
 
 export interface StoreData {
+  schemaVersion?: number;
   records: DownloadRecord[];
   lastSuccessfulRunAt?: string;
   lastScheduledAttemptAt?: string;
@@ -39,11 +40,17 @@ export interface StoreData {
   runs?: RunRecord[];
 }
 
+const SCHEMA_VERSION = 1;
 const MAX_RUN_HISTORY = 300;
+/** Keep at most 12 months of download history. */
+const RECORD_RETENTION_MS = 12 * 30 * 86_400_000;
+/** Hard cap on stored download records (bounds downloads.json size). */
+const MAX_RECORDS = 10_000;
 
 export class DownloadStore {
   private data: StoreData = { records: [], runs: [] };
   private readonly filePath: string;
+  private dirty = false;
 
   constructor(stateDir: string) {
     this.filePath = path.join(stateDir, "downloads.json");
@@ -53,6 +60,7 @@ export class DownloadStore {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     try {
       this.data = JSON.parse(await fs.readFile(this.filePath, "utf8")) as StoreData;
+      // Legacy files have no schemaVersion; keep them working as-is.
       this.data.records ??= [];
       this.data.runs ??= [];
     } catch (error) {
@@ -72,8 +80,10 @@ export class DownloadStore {
     return structuredClone(this.data);
   }
 
+  /** Queue a record for persistence. No disk write until `flush()`/`save()`. */
   add(record: DownloadRecord): void {
     this.data.records.push(record);
+    this.dirty = true;
   }
 
   async markSuccessfulRun(): Promise<void> {
@@ -94,16 +104,35 @@ export class DownloadStore {
       this.data.consecutiveFailures = 0;
       if (record.saved > 0) this.data.lastNewPhotosAt = record.finishedAt;
       if (record.mode === "reconcile") this.data.lastReconciliationAt = record.finishedAt;
-    } else if (record.outcome === "failure") {
+    } else if (record.outcome === "failure" || record.outcome === "needs_login") {
       this.data.consecutiveFailures = (this.data.consecutiveFailures || 0) + 1;
     }
 
     await this.save();
   }
 
+  /** Write queued records (and any other pending changes) to disk. */
+  async flush(): Promise<void> {
+    if (!this.dirty) return;
+    await this.save();
+  }
+
   async save(): Promise<void> {
+    this.pruneRecords();
+    this.data.schemaVersion = SCHEMA_VERSION;
     const temp = `${this.filePath}.tmp`;
     await fs.writeFile(temp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
     await fs.rename(temp, this.filePath);
+    this.dirty = false;
+  }
+
+  /** Drop very old records and enforce a hard cap so downloads.json stays bounded. */
+  private pruneRecords(): void {
+    const cutoff = Date.now() - RECORD_RETENTION_MS;
+    if (this.data.records.length > MAX_RECORDS || this.data.records.some((r) => Date.parse(r.downloadedAt) < cutoff)) {
+      this.data.records = this.data.records
+        .filter((r) => Date.parse(r.downloadedAt) >= cutoff)
+        .slice(-MAX_RECORDS);
+    }
   }
 }

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -14,6 +15,23 @@ function integer(name: string, fallback: number): number {
   const value = Number.parseInt(raw, 10);
   if (!Number.isFinite(value)) throw new Error(`${name} must be an integer.`);
   return value;
+}
+
+function boundedInteger(name: string, fallback: number, min: number, max: number): number {
+  const value = integer(name, fallback);
+  if (value < min || value > max) {
+    throw new Error(`${name} must be between ${min} and ${max} (got ${value}).`);
+  }
+  return value;
+}
+
+function enumValue<T extends string>(name: string, fallback: T, allowed: readonly T[]): T {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!allowed.includes(raw as T)) {
+    throw new Error(`${name} must be one of: ${allowed.join(", ")} (got "${raw}").`);
+  }
+  return raw as T;
 }
 
 function expandHome(input: string): string {
@@ -40,22 +58,32 @@ export const config = {
   // Set BROWSER_CHANNEL=chromium to force Playwright's bundled Chromium.
   browserChannel: process.env.BROWSER_CHANNEL?.trim() || "",
   headless: process.env.HEADLESS?.toLowerCase() === "true",
-  viewportWidth: integer("VIEWPORT_WIDTH", 1440),
-  viewportHeight: integer("VIEWPORT_HEIGHT", 1000),
-  maxSteps: integer("MAX_STEPS", 80),
-  lookbackDays: integer("LOOKBACK_DAYS", 7),
+  viewportWidth: boundedInteger("VIEWPORT_WIDTH", 1440, 640, 7680),
+  viewportHeight: boundedInteger("VIEWPORT_HEIGHT", 1000, 480, 4320),
+  maxSteps: boundedInteger("MAX_STEPS", 80, 1, 500),
+  lookbackDays: boundedInteger("LOOKBACK_DAYS", 7, 1, 30),
   minApiIntervalMs: integer("MIN_API_INTERVAL_MS", 6500),
-  minImageWidth: integer("MIN_IMAGE_WIDTH", 500),
-  minImageHeight: integer("MIN_IMAGE_HEIGHT", 350),
+  minImageWidth: boundedInteger("MIN_IMAGE_WIDTH", 500, 50, 10000),
+  minImageHeight: boundedInteger("MIN_IMAGE_HEIGHT", 350, 50, 10000),
   // Image compression (applied after dedupe, before writing to disk).
   compressImages: (process.env.COMPRESS_IMAGES?.trim() ?? "true").toLowerCase() !== "false",
-  maxDimension: integer("MAX_DIMENSION", 2048),
-  jpegQuality: integer("JPEG_QUALITY", 82),
+  maxDimension: boundedInteger("MAX_DIMENSION", 2048, 128, 8192),
+  jpegQuality: boundedInteger("JPEG_QUALITY", 82, 1, 100),
   // Telegram notifications (optional — falls back to macOS osascript).
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
   healthcheckUrl: process.env.HEALTHCHECK_URL?.trim() || "",
   // AI mode: "auto" uses the Holo agent for complex navigation, "none" forces
   // deterministic-only operation (no screenshots sent to external APIs).
-  aiMode: (process.env.AI_MODE?.trim() || "auto") as "auto" | "none",
+  aiMode: enumValue("AI_MODE", "auto", ["auto", "none"] as const),
+  // Direct HTTP poll: set to false when the portal's AJAX endpoints are behind
+  // a Cloudflare challenge that raw requests cannot pass (the downloader then
+  // always uses the browser, which is the current default behaviour anyway).
+  directPoll: (process.env.DIRECT_POLL?.trim() ?? "true").toLowerCase() !== "false",
 };
+
+// Warn early about a misconfigured download location so runs don't silently
+// write somewhere unexpected.
+if (!fs.existsSync(config.downloadDir)) {
+  console.warn(`Warning: DOWNLOAD_DIR does not exist yet (${config.downloadDir}). It will be created on the first save.`);
+}

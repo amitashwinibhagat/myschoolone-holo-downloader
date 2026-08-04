@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { notify } from "./notify.js";
 import { runJob } from "./run-job.js";
+import { logInfo, logWarn, logError, pruneDebugDirs } from "./log.js";
 
 function lookbackFromArgs(): number {
   const index = process.argv.indexOf("--lookback-days");
@@ -11,34 +12,62 @@ function lookbackFromArgs(): number {
 }
 
 async function main(): Promise<void> {
-  const { record, result, skipped, lockOwner, error } = await runJob({
+  const lookbackDays = lookbackFromArgs();
+  // The Telegram bot spawns daily.ts with --notify-summary so a successful run
+  // always reports back, even when nothing new was saved.
+  const notifySummary = process.argv.includes("--notify-summary");
+  logInfo(`Manual run starting (lookback=${lookbackDays} days, ai=${config.aiMode}).`);
+
+  const { record, result, skipped, lockOwner, error, consecutiveFailures } = await runJob({
     source: "manual",
     mode: "manual",
-    lookbackDays: lookbackFromArgs(),
+    lookbackDays,
   });
+
+  await pruneDebugDirs().catch(() => undefined);
 
   if (skipped) {
     const owner = lockOwner ? ` (${lockOwner.mode} run started ${lockOwner.startedAt})` : "";
-    console.log(`Skipped: another downloader run owns the browser profile${owner}.`);
+    const message = `Another downloader run owns the browser profile${owner}.`;
+    logWarn(`Skipped: ${message}`);
+    await notify("School photos — BUSY", message);
     return;
   }
 
   if (result) {
-    const summary = `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed (${result.daysChecked} day view(s) checked).`;
-    console.log(`\nDone: ${summary}`);
-    for (const failure of result.failures) console.log(`  ! ${failure}`);
-    if (result.saved > 0) await notify("School photos", `${result.saved} new photo(s) saved.`);
+    const summary = `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed (${result.daysChecked} day view(s) checked via ${result.transport}).`;
+    logInfo(`Done: ${summary}`);
+    for (const failure of result.failures) logWarn(`  ! ${failure}`);
+    if (notifySummary) {
+      await notify("School photos — run complete", summary);
+    } else if (result.saved > 0) {
+      await notify("School photos", `${result.saved} new photo(s) saved.`);
+    }
     return;
   }
 
   // Failure
   const message = error?.message || "Download failed without an error message.";
-  console.error(`\nFailed: ${message}`);
-  await notify("School photos — FAILED", message.slice(0, 180));
+  logError(`Failed: ${message}`);
+  if (record.outcome === "needs_login") {
+    await notify(
+      "School photos — LOGIN REQUIRED",
+      `The portal session is expired and the browser cannot sign in automatically.\nRun \`npm run login\` to restore it.\n${message.slice(0, 160)}`,
+    );
+  } else {
+    await notify("School photos — FAILED", message.slice(0, 180));
+    if ((consecutiveFailures ?? 0) >= 3) {
+      logWarn(`Failure streak reached ${consecutiveFailures} — escalating to the user.`);
+      await notify(
+        "School photos — ACTION NEEDED",
+        "Multiple consecutive failures. Recovery steps:\n1. npm run login\n2. npm run health\n3. npm run status",
+      );
+    }
+  }
   throw error || new Error(message);
 }
 
 main().catch((error) => {
-  console.error(`\nFatal error: ${(error as Error).stack || (error as Error).message}`);
+  logError(`\nFatal error: ${(error as Error).stack || (error as Error).message}`);
   process.exitCode = 1;
 });

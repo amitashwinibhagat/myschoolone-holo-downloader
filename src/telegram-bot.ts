@@ -1,10 +1,18 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { DownloadStore } from "./store.js";
-import { runJob } from "./run-job.js";
 import { formatStatus, helpText } from "./telegram-format.js";
+import { logInfo, logWarn, logError } from "./log.js";
+import { isRunLockHeld } from "./run-lock.js";
 import { sleep } from "./utils.js";
 
 const TELEGRAM_API = "https://api.telegram.org/bot";
+const OFFSET_FILE = () => path.join(config.stateDir, "telegram-offset.json");
+/** Absolute path to src/daily.ts, independent of the process working directory. */
+const DAILY_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "daily.ts");
 
 interface TelegramUpdate {
   update_id: number;
@@ -42,7 +50,7 @@ async function sendMessage(chatId: number, text: string): Promise<void> {
       parse_mode: "HTML",
     }),
   }).catch((error) => {
-    console.error(`Failed to send Telegram message to ${chatId}: ${(error as Error).message}`);
+    logError(`Failed to send Telegram message to ${chatId}: ${(error as Error).message}`);
   });
 }
 
@@ -63,40 +71,51 @@ async function getUpdates(offset: number): Promise<TelegramUpdate[]> {
   return data.result || [];
 }
 
-async function handleRun(chatId: number): Promise<void> {
-  await sendMessage(chatId, "Starting download run...");
-  const { ok, result, skipped, lockOwner, error } = await runJob({
-    source: "telegram",
-    mode: "manual",
-    lookbackDays: config.lookbackDays,
+async function loadOffset(): Promise<number> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(OFFSET_FILE(), "utf8")) as { offset?: number };
+    return Number.isInteger(parsed.offset) ? (parsed.offset as number) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function saveOffset(offset: number): Promise<void> {
+  const file = OFFSET_FILE();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ offset }, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Start a full download run as a child process. The bot replies immediately
+ * and does not block its polling loop; daily.ts sends its own Telegram
+ * notifications on completion, so a bot restart mid-run loses nothing.
+ */
+function spawnRun(chatId: number): void {
+  const args = ["--import", "tsx", DAILY_SCRIPT, "--lookback-days", String(config.lookbackDays), "--notify-summary"];
+  logInfo(`Spawning run: ${process.execPath} ${args.join(" ")}`);
+  const child = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    stdio: ["ignore", "inherit", "inherit"],
+    env: process.env,
   });
+  child.on("error", (error) => {
+    logError(`Failed to spawn run: ${error.message}`);
+    void sendMessage(chatId, `Failed to start the run: ${escapeHtml(error.message)}`);
+  });
+}
 
-  if (skipped) {
+async function handleRun(chatId: number): Promise<void> {
+  if (await isRunLockHeld(config.stateDir)) {
     await sendMessage(
       chatId,
-      `Busy: another ${lockOwner?.mode ?? "downloader"} run is in progress (started ${lockOwner?.startedAt ?? "unknown"}).`,
+      "Busy: another downloader run is in progress. I will ignore this request; wait for it to finish.",
     );
     return;
   }
 
-  if (result && ok) {
-    await sendMessage(
-      chatId,
-      [
-        "<b>Run complete</b>",
-        "",
-        `${result.saved} new`,
-        `${result.duplicates} duplicates`,
-        `${result.failures.length} failed`,
-        `${result.daysChecked} day(s) checked`,
-        `Transport: ${result.transport}`,
-      ].join("\n"),
-    );
-    return;
-  }
-
-  const message = error?.message || "Download failed without an error message.";
-  await sendMessage(chatId, `<b>Run failed</b>\n\n${escapeHtml(message.slice(0, 400))}`);
+  await sendMessage(chatId, "Starting download run... you'll get the result when it finishes.");
+  spawnRun(chatId);
 }
 
 async function handleStatus(chatId: number): Promise<void> {
@@ -105,18 +124,17 @@ async function handleStatus(chatId: number): Promise<void> {
   await sendMessage(chatId, formatStatus(store));
 }
 
-
 async function processUpdate(update: TelegramUpdate): Promise<void> {
   const chatId = update.message?.chat.id;
   const text = update.message?.text?.trim();
   if (!chatId || !text) return;
 
   if (String(chatId) !== config.telegramChatId) {
-    console.log(`Ignoring update ${update.update_id} from unauthorized chat ${chatId}.`);
+    logWarn(`Ignoring update ${update.update_id} from unauthorized chat ${chatId}.`);
     return;
   }
 
-  console.log(`Received command from chat ${chatId}: ${text}`);
+  logInfo(`Received command from chat ${chatId}: ${text}`);
   const command = text.split(/\s+/)[0].toLowerCase();
 
   switch (command) {
@@ -137,14 +155,16 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
 
 async function main(): Promise<void> {
   if (!config.telegramBotToken || !config.telegramChatId) {
-    console.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set to run the Telegram bot.");
+    logError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set to run the Telegram bot.");
     process.exitCode = 1;
     return;
   }
 
-  console.log("Telegram bot started. Waiting for commands...");
+  // Resume from the last processed update so restarts never re-process or lose commands.
+  const initialOffset = await loadOffset();
+  logInfo(`Telegram bot started${initialOffset > 0 ? `, resuming from offset ${initialOffset}` : ""}.`);
 
-  let offset = 0;
+  let offset = initialOffset;
   let running = true;
   let consecutiveErrors = 0;
 
@@ -159,25 +179,27 @@ async function main(): Promise<void> {
       const updates = await getUpdates(offset);
       consecutiveErrors = 0;
       for (const update of updates) {
-        if (update.update_id >= offset) {
-          offset = update.update_id + 1;
-        }
+        if (update.update_id < offset) continue;
         await processUpdate(update).catch((error) => {
-          console.error(`Error handling update ${update.update_id}:`, (error as Error).message);
+          logError(`Error handling update ${update.update_id}: ${(error as Error).message}`);
         });
+        // Only advance (and persist) after the update has been processed, so a
+        // crash cannot silently drop it.
+        offset = update.update_id + 1;
+        await saveOffset(offset);
       }
     } catch (error) {
       consecutiveErrors += 1;
       const delay = Math.min(30, Math.pow(2, consecutiveErrors)); // capped exponential backoff
-      console.error(`Polling error (#${consecutiveErrors}): ${(error as Error).message}. Retrying in ${delay}s...`);
+      logError(`Polling error (#${consecutiveErrors}): ${(error as Error).message}. Retrying in ${delay}s...`);
       await sleep(delay * 1000);
     }
   }
 
-  console.log("Telegram bot stopped.");
+  logInfo("Telegram bot stopped.");
 }
 
 main().catch((error) => {
-  console.error(`Fatal Telegram bot error: ${(error as Error).stack || (error as Error).message}`);
+  logError(`Fatal Telegram bot error: ${(error as Error).stack || (error as Error).message}`);
   process.exitCode = 1;
 });

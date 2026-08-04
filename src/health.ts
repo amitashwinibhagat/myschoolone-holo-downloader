@@ -2,6 +2,11 @@
  * Portal health check: fingerprints the portal's structural elements and
  * compares against a known-good baseline. Detects DOM/API changes before
  * they break the downloader.
+ *
+ * The baseline is only replaced after two consecutive runs report the same
+ * changed fingerprint, so a transient Cloudflare interstitial or maintenance
+ * page never silently becomes the new baseline. The first change is reported
+ * (and notified) while the old baseline is kept.
  */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -12,6 +17,7 @@ import { launchBrowser, waitForHumanCheck } from "./browser.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
+import { notify } from "./notify.js";
 
 const FINGERPRINT_FILE = "portal-fingerprint.json";
 
@@ -22,11 +28,19 @@ interface PortalFingerprint {
   scripts: string[];
   endpoints: string[];
   hash: string;
+  /** A previously detected, not-yet-confirmed change. */
+  pendingChange?: {
+    hash: string;
+    detectedAt: string;
+    changes: string[];
+  };
 }
 
-interface HealthCheckResult {
+export interface HealthCheckResult {
   healthy: boolean;
   changed: boolean;
+  /** True when the check could not run because the browser lock is held. */
+  skipped?: boolean;
   message: string;
   fingerprint?: PortalFingerprint;
 }
@@ -118,17 +132,15 @@ async function loadBaseline(): Promise<PortalFingerprint | null> {
  */
 async function saveBaseline(fingerprint: PortalFingerprint): Promise<void> {
   await fs.mkdir(config.stateDir, { recursive: true });
-  await fs.writeFile(
-    path.join(config.stateDir, FINGERPRINT_FILE),
-    JSON.stringify(fingerprint, null, 2),
-    { mode: 0o600 },
-  );
+  const temp = path.join(config.stateDir, `${FINGERPRINT_FILE}.tmp`);
+  await fs.writeFile(temp, JSON.stringify(fingerprint, null, 2), { mode: 0o600 });
+  await fs.rename(temp, path.join(config.stateDir, FINGERPRINT_FILE));
 }
 
 /**
  * Compare two fingerprints and return what changed.
  */
-function diffFingerprints(baseline: PortalFingerprint, current: PortalFingerprint): string[] {
+export function diffFingerprints(baseline: PortalFingerprint, current: PortalFingerprint): string[] {
   const changes: string[] = [];
 
   if (baseline.hash === current.hash) return [];
@@ -163,9 +175,43 @@ function diffFingerprints(baseline: PortalFingerprint, current: PortalFingerprin
   return changes;
 }
 
+export type BaselineDecision =
+  | { action: "first_capture" }
+  | { action: "unchanged" }
+  | { action: "recovered" }
+  | { action: "accepted_change"; changes: string[] }
+  | { action: "pending_change"; changes: string[] };
+
+/**
+ * Pure decision logic for the two-consecutive-change baseline rule:
+ * - first capture → create baseline
+ * - same fingerprint → unchanged (or "recovered" if a pending change existed)
+ * - a changed fingerprint seen twice in a row → accepted as the new baseline
+ * - any other change → pending (old baseline kept)
+ */
+export function decideBaseline(
+  baseline: PortalFingerprint | null,
+  current: PortalFingerprint,
+  changes: string[],
+): BaselineDecision {
+  if (!baseline) return { action: "first_capture" };
+  if (changes.length === 0) {
+    return baseline.pendingChange ? { action: "recovered" } : { action: "unchanged" };
+  }
+  if (baseline.pendingChange && baseline.pendingChange.hash === current.hash) {
+    return { action: "accepted_change", changes: baseline.pendingChange.changes };
+  }
+  return { action: "pending_change", changes };
+}
+
 /**
  * Run a full health check: capture fingerprint, compare to baseline.
- * If no baseline exists, capture and save one.
+ * - No baseline: capture and save one (first run).
+ * - Same fingerprint: healthy. Any pending change is cleared (portal recovered).
+ * - Different fingerprint, first sighting: keep the old baseline, notify, and
+ *   remember the change as pending.
+ * - Same different fingerprint seen twice in a row: accept it as the new
+ *   baseline.
  */
 export async function runHealthCheck(): Promise<HealthCheckResult> {
   const store = new DownloadStore(config.stateDir);
@@ -173,7 +219,7 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
   const downloads = new DownloadManager(store);
   const lock = await acquireRunLock(config.stateDir, "manual", "manual");
   if (!lock.acquired) {
-    return { healthy: false, changed: false, message: "Cannot run health check — browser is locked by another process." };
+    return { healthy: false, changed: false, skipped: true, message: "Cannot run health check — browser is locked by another process." };
   }
 
   try {
@@ -182,35 +228,73 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
       const page = browser.getPage();
       const current = await captureFingerprint(page);
       const baseline = await loadBaseline();
+      const changes = baseline ? diffFingerprints(baseline, current) : [];
+      const decision = decideBaseline(baseline, current, changes);
 
-      if (!baseline) {
-        await saveBaseline(current);
-        return {
-          healthy: true,
-          changed: false,
-          message: `First run — baseline captured (hash: ${current.hash}). Future runs will compare against this.`,
-          fingerprint: current,
-        };
+      switch (decision.action) {
+        case "first_capture":
+          await saveBaseline(current);
+          return {
+            healthy: true,
+            changed: false,
+            message: `First run — baseline captured (hash: ${current.hash}). Future runs will compare against this.`,
+            fingerprint: current,
+          };
+        case "unchanged":
+          return {
+            healthy: true,
+            changed: false,
+            message: `Portal structure unchanged (hash: ${current.hash}).`,
+            fingerprint: current,
+          };
+        case "recovered": {
+          const recovered: PortalFingerprint = { ...baseline! };
+          delete recovered.pendingChange;
+          await saveBaseline(recovered);
+          return {
+            healthy: true,
+            changed: false,
+            message: `Portal returned to the known baseline (hash: ${current.hash}) — pending change discarded.`,
+            fingerprint: current,
+          };
+        }
+        case "accepted_change": {
+          const accepted: PortalFingerprint = { ...current };
+          delete accepted.pendingChange;
+          await saveBaseline(accepted);
+          await notify(
+            "School photos — PORTAL CHANGED (confirmed)",
+            `The portal structure change was confirmed on a second run. The downloader now uses the new baseline. If downloads fail, run \`npm run login\`.\n${decision.changes.slice(0, 5).join("\n")}`,
+          );
+          return {
+            healthy: false,
+            changed: true,
+            message:
+              `Portal structure changed and confirmed twice:\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
+              `New baseline hash: ${current.hash}`,
+            fingerprint: current,
+          };
+        }
+        case "pending_change": {
+          const pending: PortalFingerprint = {
+            ...baseline!,
+            pendingChange: { hash: current.hash, detectedAt: new Date().toISOString(), changes: decision.changes },
+          };
+          await saveBaseline(pending);
+          await notify(
+            "School photos — PORTAL CHANGED",
+            `The portal structure changed. If downloads start failing, run \`npm run login\` and check \`npm run health\`.\n${decision.changes.slice(0, 5).join("\n")}`,
+          );
+          return {
+            healthy: false,
+            changed: true,
+            message:
+              `Portal structure changed (first sighting — baseline kept):\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
+              `Re-run health check to confirm and accept the new baseline.`,
+            fingerprint: current,
+          };
+        }
       }
-
-      const changes = diffFingerprints(baseline, current);
-      if (changes.length === 0) {
-        return {
-          healthy: true,
-          changed: false,
-          message: `Portal structure unchanged (hash: ${current.hash}).`,
-          fingerprint: current,
-        };
-      }
-
-      // Update baseline with the new fingerprint
-      await saveBaseline(current);
-      return {
-        healthy: false,
-        changed: true,
-        message: `Portal structure changed:\n${changes.map((c) => `  - ${c}`).join("\n")}\nBaseline updated to hash: ${current.hash}`,
-        fingerprint: current,
-      };
     } finally {
       await browser.context.close().catch(() => undefined);
     }
@@ -223,19 +307,4 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
   } finally {
     await lock.release();
   }
-}
-
-// CLI entry point
-if (process.argv[1] && process.argv[1].includes("health")) {
-  runHealthCheck()
-    .then((result) => {
-      console.log(`Healthy: ${result.healthy}`);
-      console.log(`Changed: ${result.changed}`);
-      console.log(`Message: ${result.message}`);
-      process.exitCode = result.healthy ? 0 : 1;
-    })
-    .catch((error) => {
-      console.error((error as Error).stack || (error as Error).message);
-      process.exitCode = 1;
-    });
 }

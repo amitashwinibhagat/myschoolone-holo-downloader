@@ -6,11 +6,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Frame, Page } from "playwright";
-import { launchBrowser, waitForHumanCheck } from "./browser.js";
+import { launchBrowser } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
+import { appFrame, ensureLoggedIn, writeFailureDebug } from "./portal.js";
 
 const PROGRESS_FILE = path.join(config.stateDir, "backfill-progress.json");
 
@@ -76,38 +77,6 @@ async function saveProgress(monthLabel: string): Promise<void> {
   await fs.writeFile(PROGRESS_FILE, JSON.stringify({ lastCompletedMonth: monthLabel }, null, 2));
 }
 
-function appFrame(page: Page): Frame {
-  return page.frames().find((frame) => frame !== page.mainFrame()) || page.mainFrame();
-}
-
-async function ensureLoggedIn(page: Page): Promise<void> {
-  await waitForHumanCheck(page);
-  await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => undefined);
-  await page.waitForTimeout(3_000);
-
-  const robot = page.getByText("I'm not a robot");
-  if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
-
-  const username = await page.locator("input").first().inputValue().catch(() => "");
-  if (!username) {
-    throw new Error(
-      "Login form is showing but the browser did not autofill credentials. " +
-        "Run `npm run login`, sign in once and let Edge save the password.",
-    );
-  }
-
-  console.log("Login form detected — signing in with autofilled credentials...");
-  await robot.click();
-  await page.waitForTimeout(2_000);
-  await page.getByText("Sign In", { exact: true }).click();
-  await page.waitForTimeout(8_000);
-
-  if (await page.getByText("I'm not a robot").isVisible({ timeout: 2_000 }).catch(() => false)) {
-    throw new Error("Automatic sign-in failed. Run `npm run login` manually.");
-  }
-}
-
-/** Navigate to Daily Log, then click the "Previous year log" tab (3rd tab). */
 async function openPreviousYearLog(page: Page): Promise<Frame> {
   // Step 1: Open the Daily Log page (same navigation as daily.ts).
   const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl).toString();
@@ -281,6 +250,8 @@ async function main(): Promise<void> {
       console.log(`[${chunk.label}] Done — running total: ${totals.saved} saved, ${totals.duplicates} dupes.`);
       }
 
+      await downloads.flush();
+
       const summary =
       `EY1 Backfill complete (${totals.monthsProcessed} months)\n` +
       `✓ ${totals.saved} new | ${totals.duplicates} duplicates | ${totals.failures.length} failed`;
@@ -292,9 +263,7 @@ async function main(): Promise<void> {
       }
       await notify("EY1 Backfill", summary);
     } catch (error) {
-      const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
-      await fs.mkdir(dir, { recursive: true });
-      await browser.getPage().screenshot({ path: path.join(dir, "backfill-failure.png") }).catch(() => undefined);
+      await writeFailureDebug(browser.getPage(), "backfill-failure");
       await notify("EY1 Backfill — INTERRUPTED", (error as Error).message.slice(0, 200));
       throw error;
     } finally {

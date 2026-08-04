@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { runDownload, type RunDownloadResult } from "./run-download.js";
 import { acquireRunLock, type RunLock } from "./run-lock.js";
+import { NeedsHumanLoginError } from "./portal.js";
 import { DownloadStore, type RunMode, type RunRecord, type RunSource } from "./store.js";
 
 export interface RunJobInput {
@@ -18,6 +19,8 @@ export interface RunJobOutput {
   skipped: boolean;
   lockOwner?: { mode: RunMode; source: RunSource; startedAt: string };
   lock: RunLock;
+  /** Current consecutive-failure streak after this run (from the store). */
+  consecutiveFailures?: number;
 }
 
 export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
@@ -59,6 +62,7 @@ export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
 
   try {
     const result = await runDownload(store, input.lookbackDays);
+    await store.flush();
     const record: RunRecord = {
       startedAt,
       finishedAt: new Date().toISOString(),
@@ -72,16 +76,20 @@ export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
       daysChecked: result.daysChecked,
     };
     await store.recordRun(record);
-    return { ok: true, record, result, skipped: false, lock };
+    return { ok: true, record, result, skipped: false, lock, consecutiveFailures: store.snapshot().consecutiveFailures };
   } catch (error) {
+    // Best-effort flush: the original download error must never be replaced by
+    // a persistence error (e.g. ENOSPC) in this path.
+    await store.flush().catch(() => undefined);
     const message = (error as Error).message;
+    const loginRequired = error instanceof NeedsHumanLoginError;
     const record: RunRecord = {
       startedAt,
       finishedAt: new Date().toISOString(),
       source: input.source,
       mode: input.mode,
       transport: "browser",
-      outcome: "failure",
+      outcome: loginRequired ? "needs_login" : "failure",
       saved: 0,
       duplicates: 0,
       failures: 1,
@@ -89,7 +97,7 @@ export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
       error: message,
     };
     await store.recordRun(record);
-    return { ok: false, record, error: error as Error, skipped: false, lock };
+    return { ok: false, record, error: error as Error, skipped: false, lock, consecutiveFailures: store.snapshot().consecutiveFailures };
   } finally {
     await lock.release();
   }

@@ -27,8 +27,26 @@ export interface SaveResult {
   reason?: string;
 }
 
+export interface DownloadStats {
+  saved: number;
+  duplicates: number;
+}
+
 export class DownloadManager {
+  private savesSinceFlush = 0;
+  private savedCount = 0;
+  private duplicatesCount = 0;
   constructor(private readonly store: DownloadStore) {}
+
+  /** Persist any queued download records to disk. Call at the end of a run. */
+  async flush(): Promise<void> {
+    await this.store.flush();
+  }
+
+  /** Cumulative saved/duplicate counts for this manager instance. */
+  stats(): DownloadStats {
+    return { saved: this.savedCount, duplicates: this.duplicatesCount };
+  }
 
   async captureNativeDownload(download: Download): Promise<void> {
     try {
@@ -169,7 +187,10 @@ export class DownloadManager {
     }
 
     const hash = sha256(body);
-    if (this.store.hasHash(hash)) return { saved: false, duplicate: true };
+    if (this.store.hasHash(hash)) {
+      this.duplicatesCount += 1;
+      return { saved: false, duplicate: true };
+    }
 
     // Compress after dedupe so the hash always represents the original file.
     let output = body;
@@ -197,7 +218,12 @@ export class DownloadManager {
 
     const filename = `${hash.slice(0, 10)}-${name}${extension}`;
     const destination = path.join(folder, filename);
-    await fs.writeFile(destination, output);
+
+    // Write to a temp file first so a crash mid-write never leaves a partial
+    // image at the final path.
+    const temp = `${destination}.tmp`;
+    await fs.writeFile(temp, output);
+    await fs.rename(temp, destination);
 
     this.store.add({
       hash,
@@ -206,7 +232,15 @@ export class DownloadManager {
       savedPath: destination,
       downloadedAt: new Date().toISOString(),
     });
-    await this.store.save();
+
+    // Batch state persistence: full-file writes only every N saves (and at the
+    // end of the run via flush()).
+    this.savesSinceFlush += 1;
+    if (this.savesSinceFlush >= 10) {
+      this.savesSinceFlush = 0;
+      await this.store.flush();
+    }
+    this.savedCount += 1;
     return { saved: true, duplicate: false, path: destination };
   }
 }

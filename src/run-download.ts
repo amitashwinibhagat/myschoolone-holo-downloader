@@ -1,12 +1,18 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { Frame, Page } from "playwright";
-import { launchBrowser, waitForHumanCheck } from "./browser.js";
+import { launchBrowser } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore, type RunTransport } from "./store.js";
 import { observeDailyLogRequests } from "./direct-discovery.js";
-import { directPollAttachments, isDirectPollAvailable, fetchAttachmentBuffer } from "./direct-api.js";
+import {
+  directPollAttachments,
+  isDirectPollAvailable,
+  fetchAttachmentBuffer,
+  loadCookies,
+  type DirectPollOutcome,
+} from "./direct-api.js";
+import { appFrame, ensureLoggedIn, NeedsHumanLoginError, writeFailureDebug } from "./portal.js";
+import { checkSession } from "./session.js";
 import { dateInIndia, sleep } from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
@@ -29,54 +35,6 @@ function istDate(daysAgo: number): { iso: string; portal: string } {
   const iso = dateInIndia(new Date(Date.now() - daysAgo * 86_400_000));
   const [year, month, day] = iso.split("-");
   return { iso, portal: `${day}/${month}/${year}` };
-}
-
-/**
- * Load cookies from the saved session state for direct HTTP requests.
- * Re-exported from direct-api for use in the run-download module.
- */
-async function loadCookiesForDirect(): Promise<Array<{
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-}>> {
-  const fs_ = await import("node:fs/promises");
-  const statePath = config.sessionStatePath;
-  const raw = await fs_.readFile(statePath, "utf8");
-  const state = JSON.parse(raw) as { cookies: Array<{ name: string; value: string; domain: string; path: string }> };
-  return state.cookies || [];
-}
-
-function appFrame(page: Page): Frame {
-  return page.frames().find((frame) => frame !== page.mainFrame()) || page.mainFrame();
-}
-
-async function ensureLoggedIn(page: Page): Promise<void> {
-  await waitForHumanCheck(page);
-  await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => undefined);
-  await page.waitForTimeout(3_000);
-
-  const robot = page.getByText("I'm not a robot");
-  if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
-
-  const username = await page.locator("input").first().inputValue().catch(() => "");
-  if (!username) {
-    throw new Error(
-      "Login form is showing but the browser did not autofill credentials. " +
-        "Run `npm run login`, sign in once and save the password.",
-    );
-  }
-
-  console.log("Login form detected — signing in with autofilled credentials...");
-  await robot.click();
-  await page.waitForTimeout(2_000);
-  await page.getByText("Sign In", { exact: true }).click();
-  await page.waitForTimeout(8_000);
-
-  if (await page.getByText("I'm not a robot").isVisible({ timeout: 2_000 }).catch(() => false)) {
-    throw new Error("Automatic sign-in failed; the login form is still visible. Run `npm run login` manually.");
-  }
 }
 
 async function openDailyLog(page: Page): Promise<Frame> {
@@ -143,29 +101,32 @@ async function downloadAll(
   }
 }
 
-async function writeFailureDebug(page: Page): Promise<void> {
-  const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
-  await fs.mkdir(dir, { recursive: true });
-  await page.screenshot({ path: path.join(dir, "daily-failure.png") }).catch(() => undefined);
-  await fs.writeFile(path.join(dir, "page.html"), await page.content().catch(() => ""));
-}
-
 /**
  * Attempt downloads via direct HTTP requests (no browser).
- * Uses saved session cookies to call the portal's AJAX endpoints directly.
+ * Uses saved session cookies and the captured AJAX request structure to call
+ * the portal's endpoints directly.
  */
-async function directAttempt(store: DownloadStore, lookbackDays: number): Promise<RunTotals> {
+async function directAttempt(
+  store: DownloadStore,
+  lookbackDays: number,
+): Promise<{ totals: RunTotals; outcome: DirectPollOutcome; fetchErrors: number }> {
   const downloads = new DownloadManager(store);
   const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0 };
 
-  const results = await directPollAttachments(lookbackDays);
+  const outcome = await directPollAttachments(lookbackDays);
+  let fetchErrors = 0;
 
-  for (const dayResult of results) {
+  for (const dayResult of outcome.results) {
     totals.daysChecked += 1;
+    if (dayResult.error) {
+      fetchErrors += 1;
+      totals.failures.push(`${dayResult.dateLabel}: ${dayResult.error}`);
+      continue;
+    }
     if (dayResult.urls.length === 0) continue;
 
-    // Load cookies once for the batch
-    const cookies = await loadCookiesForDirect();
+    // Load cookies once for the batch.
+    const cookies = await loadCookies();
 
     for (const url of dayResult.urls) {
       try {
@@ -175,7 +136,7 @@ async function directAttempt(store: DownloadStore, lookbackDays: number): Promis
           continue;
         }
 
-        // Determine a reasonable filename from the URL
+        // Determine a reasonable filename from the URL.
         const urlParts = url.split("/");
         const rawName = decodeURIComponent(urlParts[urlParts.length - 1] || "school-photo");
         const suggestedName = rawName.split("?")[0] || "school-photo";
@@ -202,7 +163,7 @@ async function directAttempt(store: DownloadStore, lookbackDays: number): Promis
     }
   }
 
-  return totals;
+  return { totals, outcome, fetchErrors };
 }
 
 async function browserAttempt(store: DownloadStore, lookbackDays: number): Promise<RunTotals> {
@@ -236,27 +197,64 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
     }
     return totals;
   } catch (error) {
-    await writeFailureDebug(browser.getPage());
+    await writeFailureDebug(browser.getPage(), "daily-failure");
     throw error;
   } finally {
     await browser.context.close().catch(() => undefined);
   }
 }
 
+/**
+ * Decide whether a direct-poll outcome should be trusted or require a browser
+ * fallback. We distrust the direct result when:
+ * - any fetch-level error occurred (session/endpoint problem the browser can
+ *   recover from — and it refreshes the discovery file), or
+ * - nothing was found across the ENTIRE lookback window. A stale captured
+ *   `type` value could otherwise silently hide real photos until the discovery
+ *   file expires, so an all-empty window is always verified once with the
+ *   browser. (When at least one day yielded attachments, the direct result is
+ *   trusted even if some days were empty.)
+ */
+function directNeedsFallback(totals: RunTotals, outcome: DirectPollOutcome, fetchErrors: number): boolean {
+  if (fetchErrors > 0) return true;
+  const anyUrlsFound = totals.saved > 0 || totals.duplicates > 0;
+  if (anyUrlsFound) return false;
+  if (!outcome.discoveryUsed) return true;
+  return true; // whole window empty → verify once with the browser
+}
+
 export async function runDownload(store: DownloadStore, lookbackDays: number): Promise<RunDownloadResult> {
-  // Try direct-poll first — faster, no browser needed, no AI cost.
+  // Cheap session gate before deciding whether the direct path is worth trying.
+  let session: Awaited<ReturnType<typeof checkSession>> | undefined;
   if (await isDirectPollAvailable()) {
+    session = await checkSession().catch(() => undefined);
+    if (session) {
+      if (session.status === "ok" && session.cookiesExpiringSoon) {
+        console.warn("Session cookies expire within 48h — run `npm run login` soon.");
+      } else if (session.status === "expired") {
+        console.log("Saved session expired — going straight to the browser (it can auto-sign-in).");
+      } else if (session.status === "challenge") {
+        console.log("Session check shows a bot challenge — using the browser path.");
+      } else if (session.status === "unreachable") {
+        console.warn(`Session check: portal unreachable (${session.reason}) — will still try the browser.`);
+      }
+    }
+  }
+
+  // Try direct-poll first — faster, no browser needed, no AI cost. Disabled by
+  // DIRECT_POLL=false when the portal's AJAX endpoints reject raw requests.
+  const directWorthTrying =
+    config.directPoll &&
+    (await isDirectPollAvailable()) &&
+    (!session || session.status === "ok" || session.status === "challenge");
+  if (directWorthTrying) {
     console.log("Attempting direct HTTP poll (no browser)...");
     try {
-      const totals = await directAttempt(store, lookbackDays);
-      // Only trust direct-poll if it found at least one attachment or had explicit
-      // failures. If every day returned 0 URLs the AJAX endpoint likely didn't work,
-      // so fall back to the browser to verify.
-      const anyUrlsFound = totals.daysChecked > 0 && (totals.saved > 0 || totals.duplicates > 0);
-      if (anyUrlsFound || totals.failures.length > 0) {
+      const { totals, outcome, fetchErrors } = await directAttempt(store, lookbackDays);
+      if (!directNeedsFallback(totals, outcome, fetchErrors)) {
         return { ...totals, transport: "direct" };
       }
-      console.log("Direct poll found no attachments — falling back to browser to verify.");
+      console.log("Direct poll inconclusive — falling back to browser to verify.");
     } catch (error) {
       console.warn(`Direct poll failed: ${(error as Error).message} — falling back to browser.`);
     }
@@ -271,6 +269,11 @@ export async function runDownload(store: DownloadStore, lookbackDays: number): P
     } catch (error) {
       lastError = error as Error;
       console.error(`Attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${lastError.message}`);
+      if (lastError instanceof NeedsHumanLoginError) {
+        // A human must re-login; retrying immediately would just waste time.
+        console.error("Login required — not retrying automatically.");
+        break;
+      }
       if (attemptNumber < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
     }
   }
