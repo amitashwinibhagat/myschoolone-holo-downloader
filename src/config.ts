@@ -82,10 +82,11 @@ export const config = {
   // Stored in plaintext in .env — only use on a trusted, single-user machine.
   schoolUsername: process.env.SCHOOL_USERNAME?.trim() || "",
   schoolPassword: process.env.SCHOOL_PASSWORD || "",
-  // Direct HTTP poll: set to false when the portal's AJAX endpoints are behind
-  // a Cloudflare challenge that raw requests cannot pass (the downloader then
-  // always uses the browser, which is the current default behaviour anyway).
-  directPoll: (process.env.DIRECT_POLL?.trim() ?? "true").toLowerCase() !== "false",
+  // Direct HTTP poll: disabled by default because the portal's AJAX endpoints
+  // sit behind a Cloudflare challenge that raw requests cannot pass — the
+  // failed POSTs add bot-score noise against the same IP right before the
+  // browser logs in. Enable only if the challenge is removed.
+  directPoll: (process.env.DIRECT_POLL?.trim() ?? "false").toLowerCase() === "true",
 };
 
 // Warn early about a misconfigured download location so runs don't silently

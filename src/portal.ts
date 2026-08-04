@@ -24,9 +24,10 @@ export function appFrame(page: Page): Frame {
 /**
  * Wait for any Cloudflare challenge to clear and, if a login form is showing,
  * sign in automatically. Credentials come from SCHOOL_USERNAME/SCHOOL_PASSWORD
- * in .env when set (fully automatic); otherwise the browser's autofilled
- * values are used. Throws NeedsHumanLoginError when sign-in cannot be
- * completed without a human.
+ * in .env when set (fully deterministic); otherwise the browser's autofilled
+ * values are used (polled for up to ~15s). One transient failure is retried
+ * after a page reload; never more than two attempts to avoid tripping the
+ * portal's login-attempt lockout.
  */
 export async function ensureLoggedIn(page: Page): Promise<void> {
   await waitForHumanCheck(page);
@@ -36,22 +37,17 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
   const robot = page.getByText("I'm not a robot");
   if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
 
-  const usernameField = page.locator("#user_names");
-  const passwordField = page.locator("#password");
-  if ((await usernameField.count()) === 0 || (await passwordField.count()) === 0) {
-    throw new NeedsHumanLoginError(
-      "Login form is showing but its username/password fields were not found. " +
-        "The portal layout may have changed — run `npm run login` manually.",
-    );
-  }
-
-  // Prefer explicit credentials from .env; fall back to whatever the browser
-  // autofilled into the real fields.
+  // Resolve credentials: env vars first, otherwise Chrome autofill.
   let username = config.schoolUsername;
   let password = config.schoolPassword;
   if (!username || !password) {
-    username = username || (await usernameField.inputValue().catch(() => ""));
-    password = password || (await passwordField.inputValue().catch(() => ""));
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      username = username || (await page.locator("#user_names").inputValue().catch(() => ""));
+      password = password || (await page.locator("#password").inputValue().catch(() => ""));
+      if (username && password) break;
+      await page.waitForTimeout(1_000);
+    }
   }
   if (!username || !password) {
     throw new NeedsHumanLoginError(
@@ -61,29 +57,67 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
     );
   }
 
-  console.log("Login form detected — signing in automatically...");
-  await usernameField.fill(username);
-  await passwordField.fill(password);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await performSignIn(page, username, password);
+      return;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      console.warn(`Auto sign-in attempt ${attempt} failed (${(error as Error).message}) — reloading and retrying once.`);
+      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+      await waitForHumanCheck(page);
+      await page.waitForTimeout(3_000);
+      if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
+    }
+  }
+}
 
-  // Tick the "I'm not a robot" checkbox (label toggles #imrobot) and verify.
-  await robot.click();
-  const robotChecked = await page
-    .locator("#imrobot")
-    .isChecked()
-    .catch(() => false);
-  if (!robotChecked) {
-    await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
+/** Fill the login form deterministically and submit. Throws on failure. */
+async function performSignIn(page: Page, username: string, password: string): Promise<void> {
+  // Set the values via evaluate so Chrome's autofill/overlays cannot race or
+  // clear them before login() reads the fields.
+  await page.evaluate(
+    ({ u, p }) => {
+      const user = document.querySelector("#user_names") as HTMLInputElement | null;
+      const pass = document.querySelector("#password") as HTMLInputElement | null;
+      if (!user || !pass) throw new Error("login fields not found");
+      user.value = u;
+      pass.value = p;
+      user.dispatchEvent(new Event("input", { bubbles: true }));
+      pass.dispatchEvent(new Event("input", { bubbles: true }));
+    },
+    { u: username, p: password },
+  );
+
+  const actualUser = await page.locator("#user_names").inputValue().catch(() => "");
+  const actualPass = await page.locator("#password").inputValue().catch(() => "");
+  if (!actualUser || !actualPass) {
+    throw new NeedsHumanLoginError("Failed to set login credentials on the form.");
   }
 
-  // The Sign In anchor calls login(), which RSA-encrypts the values and
-  // submits via AJAX. Click it and wait for the form to actually go away.
+  // Tick the "I'm not a robot" checkbox deterministically and verify.
+  await page.evaluate(() => {
+    const box = document.querySelector("#imrobot") as HTMLInputElement | null;
+    if (!box) throw new Error("robot checkbox not found");
+    box.checked = true;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const checked = await page.locator("#imrobot").isChecked().catch(() => false);
+  if (!checked) await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
+
+  console.log("Login form detected — signing in automatically...");
   await page.getByText("Sign In", { exact: true }).click();
 
+  // login() RSA-encrypts the values and submits via AJAX; wait for the form to
+  // actually go away.
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(2_000);
-    const formStillVisible = await robot.isVisible({ timeout: 1_000 }).catch(() => false);
-    if (!formStillVisible) return; // signed in — form is gone
+    const formGone = await page
+      .getByText("I'm not a robot")
+      .isVisible({ timeout: 1_000 })
+      .catch(() => false);
+    if (!formGone) return;
   }
 
   throw new NeedsHumanLoginError(
