@@ -6,7 +6,7 @@
  * about expiring cookies, and avoid blind retries when a human must re-login.
  */
 import { config } from "./config.js";
-import { loadCookies, sessionExpiresWithin, buildCookieHeader, DEFAULT_USER_AGENT } from "./direct-api.js";
+import { loadCookies, sessionExpiresWithin, fetchSameOrigin, DEFAULT_USER_AGENT } from "./direct-api.js";
 
 export type SessionStatus = "ok" | "expired" | "challenge" | "unreachable";
 
@@ -58,15 +58,23 @@ export async function checkSession(): Promise<SessionCheckResult> {
   const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl);
 
   try {
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": DEFAULT_USER_AGENT,
-        Cookie: buildCookieHeader(cookies, url),
+    const response = await fetchSameOrigin(
+      url.toString(),
+      {
+        method: "GET",
+        headers: {
+          "User-Agent": DEFAULT_USER_AGENT,
+        },
+        signal: AbortSignal.timeout(20_000),
       },
-      signal: AbortSignal.timeout(20_000),
-    });
+      (candidate) => candidate.origin === url.origin,
+      { cookies },
+    );
+    // A 3xx here means the portal tried to redirect us off-origin (or the
+    // chain exceeded the limit) — refuse to follow, treat it as needing login.
+    if (response.status >= 300 && response.status < 400) {
+      return { status: "expired", reason: `Portal redirected off-origin (HTTP ${response.status}).`, cookiesExpiringSoon };
+    }
     const text = await response.text();
     const status = classifyBody(text, response.url || url.toString());
     if (status === "expired") {

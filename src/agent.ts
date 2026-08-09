@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "playwright";
+import type { ChatCompletion, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { launchBrowser, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
@@ -9,6 +10,7 @@ import { DownloadStore, type RunRecord } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
 import { notify } from "./notify.js";
 import { logInfo, logWarn, logError } from "./log.js";
+import { sanitizedPageHtml } from "./portal.js";
 import { sleep } from "./utils.js";
 
 const SYSTEM_PROMPT = `You are a careful browser agent operating the MySchoolOne Pro parent portal for Amit.
@@ -29,7 +31,7 @@ Rules:
 
 Be conservative: do not click anything that could communicate with the school or alter portal data.`;
 
-function trimOldImages(messages: any[], keep = 3): void {
+function trimOldImages(messages: ChatCompletionMessageParam[], keep = 3): void {
   let seen = 0;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -38,15 +40,18 @@ function trimOldImages(messages: any[], keep = 3): void {
       if (chunk.type !== "image_url") continue;
       seen += 1;
       if (seen > keep) {
-        chunk.type = "text";
-        chunk.text = "[older screenshot removed]";
-        delete chunk.image_url;
+        // Replace the image chunk with a text placeholder so the request stays
+        // small. The SDK types do not model this in-place mutation, so cast.
+        const placeholder = chunk as unknown as { type: "text"; text: string };
+        placeholder.type = "text";
+        placeholder.text = "[older screenshot removed]";
+        delete (chunk as { image_url?: unknown }).image_url;
       }
     }
   }
 }
 
-async function observation(page: Page): Promise<any> {
+async function observation(page: Page): Promise<ChatCompletionMessageParam> {
   await page.waitForTimeout(700);
   const screenshot = await page.screenshot({ type: "png", animations: "disabled" });
   const pageText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
@@ -63,7 +68,7 @@ async function observation(page: Page): Promise<any> {
   };
 }
 
-async function executeTool(name: string, args: any, page: Page, downloads: DownloadManager): Promise<string> {
+async function executeTool(name: string, args: Record<string, unknown>, page: Page, downloads: DownloadManager): Promise<string> {
   switch (name) {
     case "click": {
       const x = Math.round((Number(args.x) / 1000) * config.viewportWidth);
@@ -105,9 +110,10 @@ async function executeTool(name: string, args: any, page: Page, downloads: Downl
 
 async function writeDebug(page: Page, step: number): Promise<void> {
   const dir = path.resolve("debug");
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700).catch(() => undefined);
   await page.screenshot({ path: path.join(dir, `failed-step-${step}.png`), fullPage: false }).catch(() => undefined);
-  await fs.writeFile(path.join(dir, `failed-step-${step}.html`), await page.content().catch(() => ""));
+  await fs.writeFile(path.join(dir, `failed-step-${step}.html`), await sanitizedPageHtml(page), { mode: 0o600 });
 }
 
 async function main(): Promise<void> {
@@ -136,7 +142,7 @@ async function main(): Promise<void> {
       await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await waitForHumanCheck(page);
 
-      const messages: any[] = [{ role: "system", content: SYSTEM_PROMPT }];
+      const messages: ChatCompletionMessageParam[] = [{ role: "system", content: SYSTEM_PROMPT }];
 
       for (let step = 1; step <= config.maxSteps; step += 1) {
         page = browser.getPage();
@@ -145,13 +151,14 @@ async function main(): Promise<void> {
         trimOldImages(messages, 3);
 
         try {
-          const response = await holo.next(messages);
+          const response: ChatCompletion = await holo.next(messages);
           const assistant = response.choices[0]?.message;
           const call = assistant?.tool_calls?.[0];
           if (!call) throw new Error("Holo returned no tool call.");
+          if (call.type !== "function") throw new Error(`Unexpected tool call type: ${call.type}`);
 
           const name = call.function.name;
-          const args = JSON.parse(call.function.arguments || "{}");
+          const args: Record<string, unknown> = JSON.parse(call.function.arguments || "{}");
           logInfo(`Holo → ${name} ${JSON.stringify(args)}`);
 
           messages.push({
@@ -167,7 +174,7 @@ async function main(): Promise<void> {
             const stats = downloads.stats();
             await recordAgentRun(store, startedAt, {
               outcome: "success",
-              message: args.summary || "Agent finished.",
+              message: typeof args.summary === "string" ? args.summary : "Agent finished.",
               saved: stats.saved,
               duplicates: stats.duplicates,
             });

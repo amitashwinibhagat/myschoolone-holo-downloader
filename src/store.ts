@@ -51,6 +51,8 @@ export class DownloadStore {
   private data: StoreData = { records: [], runs: [] };
   private readonly filePath: string;
   private dirty = false;
+  /** O(1) duplicate lookup, kept in sync with data.records. */
+  private hashes = new Set<string>();
 
   constructor(stateDir: string) {
     this.filePath = path.join(stateDir, "downloads.json");
@@ -63,13 +65,14 @@ export class DownloadStore {
       // Legacy files have no schemaVersion; keep them working as-is.
       this.data.records ??= [];
       this.data.runs ??= [];
+      this.hashes = new Set(this.data.records.map((r) => r.hash));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
   hasHash(hash: string): boolean {
-    return this.data.records.some((record) => record.hash === hash);
+    return this.hashes.has(hash);
   }
 
   lastSuccessfulRunAt(): string | undefined {
@@ -83,6 +86,7 @@ export class DownloadStore {
   /** Queue a record for persistence. No disk write until `flush()`/`save()`. */
   add(record: DownloadRecord): void {
     this.data.records.push(record);
+    this.hashes.add(record.hash);
     this.dirty = true;
   }
 
@@ -133,6 +137,7 @@ export class DownloadStore {
       this.data.records = this.data.records
         .filter((r) => Date.parse(r.downloadedAt) >= cutoff)
         .slice(-MAX_RECORDS);
+      this.hashes = new Set(this.data.records.map((r) => r.hash));
     }
   }
 }

@@ -9,6 +9,8 @@ export interface RunJobInput {
   mode: RunMode;
   lookbackDays: number;
   stateDir?: string;
+  /** Test seam: override the real downloader (defaults to runDownload). */
+  runDownloadImpl?: (store: DownloadStore, lookbackDays: number) => Promise<RunDownloadResult>;
 }
 
 export interface RunJobOutput {
@@ -60,8 +62,10 @@ export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
     };
   }
 
+  const download = input.runDownloadImpl ?? runDownload;
+
   try {
-    const result = await runDownload(store, input.lookbackDays);
+    const result = await download(store, input.lookbackDays);
     await store.flush();
     const record: RunRecord = {
       startedAt,

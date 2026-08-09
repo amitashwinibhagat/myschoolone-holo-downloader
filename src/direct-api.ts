@@ -61,7 +61,7 @@ export interface DirectPollOutcome {
   discoveryComplete: boolean;
 }
 
-interface Cookie {
+export interface Cookie {
   name: string;
   value: string;
   domain: string;
@@ -106,16 +106,28 @@ export async function sessionExpiresWithin(horizonMs: number): Promise<boolean> 
 }
 
 /**
+ * Host-boundary match mirroring browser cookie semantics:
+ * - a host-only domain (no leading dot) matches only the exact host,
+ * - a domain cookie (leading dot) also matches its subdomains.
+ * `school.example.com` therefore matches `school.example.com` and, with a
+ * leading dot, `uploads.school.example.com` — but never `evilschool.example.com`
+ * or `school.example.com.evil.net`.
+ */
+export function hostMatchesDomain(host: string, cookieDomain: string): boolean {
+  const domainCookie = cookieDomain.startsWith(".");
+  const domain = (domainCookie ? cookieDomain.slice(1) : cookieDomain).toLowerCase();
+  const normalizedHost = host.toLowerCase();
+  return normalizedHost === domain || (domainCookie && normalizedHost.endsWith(`.${domain}`));
+}
+
+/**
  * Convert Playwright storage-state cookies into a Cookie header string.
  * Exported so the session check can reuse the same domain/path matching.
  */
 export function buildCookieHeader(cookies: Cookie[], url: URL): string {
-  const origin = url.origin;
+  const host = url.hostname;
   return cookies
-    .filter((c) => {
-      const domain = c.domain.startsWith(".") ? c.domain.slice(1) : c.domain;
-      return origin.endsWith(domain) && url.pathname.startsWith(c.path || "/");
-    })
+    .filter((c) => hostMatchesDomain(host, c.domain) && url.pathname.startsWith(c.path || "/"))
     .map((c) => `${c.name}=${c.value}`)
     .join("; ");
 }
@@ -181,6 +193,99 @@ export function extractAttachmentUrls(html: string): string[] {
 }
 
 /**
+ * Pure decision for one redirect hop: returns the next request to issue, or
+ * null when the redirect must not be followed (non-3xx, no Location header,
+ * chain limit reached, or the target is not allowed). Mirrors the fetch
+ * spec's method handling: 301/302/303 become GET, 307/308 keep method/body.
+ */
+export function nextRedirectRequest(
+  status: number,
+  location: string | null,
+  currentUrl: string,
+  isAllowed: (url: URL) => boolean,
+  redirectsUsed: number,
+  maxRedirects: number,
+  method: string,
+  body: BodyInit | null | undefined,
+): { url: string; method: string; body: BodyInit | null | undefined } | null {
+  if (status < 300 || status >= 400) return null;
+  if (!location) return null;
+  if (redirectsUsed >= maxRedirects) return null;
+  let next: URL;
+  try {
+    next = new URL(location, currentUrl);
+  } catch {
+    return null;
+  }
+  if (!isAllowed(next)) return null;
+  if (status === 301 || status === 302 || status === 303) {
+    return { url: next.toString(), method: "GET", body: undefined };
+  }
+  return { url: next.toString(), method, body };
+}
+
+/**
+ * Options for {@link fetchSameOrigin}.
+ */
+export interface SameOriginOptions {
+  /**
+   * Cookie jar used to recompute the Cookie header for each hop, so cookies
+   * never follow a redirect to a host they are not scoped to.
+   */
+  cookies?: Cookie[];
+  maxRedirects?: number;
+}
+
+/**
+ * Fetch with manual redirect handling. Follows redirects only while the target
+ * is allowed by `isAllowed`, so a manually-attached Cookie header can never be
+ * forwarded to a different host. When `options.cookies` is set, the Cookie
+ * header is rebuilt per hop from the jar (host-scoped) instead of being
+ * carried over unchanged. Returns the last response — a 3xx when the
+ * redirect chain is refused or exceeds the limit, so callers see a non-ok
+ * response.
+ */
+export async function fetchSameOrigin(
+  input: string,
+  init: RequestInit,
+  isAllowed: (url: URL) => boolean,
+  options: SameOriginOptions = {},
+): Promise<Response> {
+  const maxRedirects = options.maxRedirects ?? 5;
+  const requestHeaders = new Headers(init.headers);
+  let url = input;
+  let method = init.method ?? "GET";
+  let body = init.body;
+  const signal = init.signal;
+  for (let redirects = 0; ; redirects += 1) {
+    if (options.cookies) {
+      const cookieHeader = buildCookieHeader(options.cookies, new URL(url));
+      if (cookieHeader) requestHeaders.set("cookie", cookieHeader);
+      else requestHeaders.delete("cookie");
+    }
+    const response = await fetch(url, { method, headers: requestHeaders, body, signal, redirect: "manual" });
+    const next = nextRedirectRequest(
+      response.status,
+      response.headers.get("location"),
+      url,
+      isAllowed,
+      redirects,
+      maxRedirects,
+      method,
+      body,
+    );
+    if (!next) return response;
+    ({ url, method, body } = next);
+    if (next.body === undefined) {
+      // The follow-up is a bodyless GET — drop body-only headers (the Cookie
+      // header is recomputed above when a cookie jar was supplied).
+      requestHeaders.delete("content-type");
+      requestHeaders.delete("content-length");
+    }
+  }
+}
+
+/**
  * POST to the given portal path with the given body and extract attachment
  * URLs from the response (HTML or JSON).
  */
@@ -201,20 +306,22 @@ async function postAndExtract(
     "User-Agent": DEFAULT_USER_AGENT,
   };
 
-  const cookieStr = buildCookieHeader(cookies, baseUrl);
-  if (cookieStr) headers.Cookie = cookieStr;
-
   const resolved = new URL(`${path}${query}`, baseUrl);
   if (resolved.origin !== baseUrl.origin) {
     throw new Error(`Refusing to POST to off-origin endpoint: ${resolved.origin}`);
   }
 
-  const response = await fetch(resolved.toString(), {
-    method: "POST",
-    headers,
-    body,
-    redirect: "follow",
-  });
+  const response = await fetchSameOrigin(
+    resolved.toString(),
+    {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(20_000),
+    },
+    (url) => url.origin === baseUrl.origin,
+    { cookies },
+  );
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} fetching daily log data`);
@@ -247,8 +354,23 @@ async function postAndExtract(
 }
 
 /**
- * Make a direct HTTP request to download an image attachment.
- * Uses the saved session cookies for authentication.
+ * Gate for attachment downloads: the school host or any subdomain of it, on
+ * the same protocol as the configured school URL, plus any hosts in
+ * `config.attachmentAllowedHosts` (e.g. the MySchoolOne CloudFront CDN).
+ * Look-alike hosts (`evilschool.example.com`, `school.example.com.evil.net`,
+ * an unrelated CloudFront distribution) are rejected.
+ */
+export function attachmentHostAllowed(url: URL): boolean {
+  const school = new URL(config.schoolUrl);
+  if (url.protocol !== school.protocol) return false;
+  // Leading dot: treat the school host like a domain cookie so its subdomains
+  // are allowed (exact host still matches).
+  if (hostMatchesDomain(url.hostname, `.${school.hostname}`)) return true;
+  return config.attachmentAllowedHosts.some((host) => hostMatchesDomain(url.hostname, host));
+}
+
+/**
+ * Download a single image attachment using the saved session cookies.
  */
 export async function fetchAttachmentBuffer(
   cookies: Cookie[],
@@ -261,6 +383,10 @@ export async function fetchAttachmentBuffer(
     return null;
   }
 
+  // Never attach session cookies to a different host — reject absolute URLs
+  // the portal content points at an off-origin (e.g. look-alike) domain.
+  if (!attachmentHostAllowed(targetUrl)) return null;
+
   const headers: Record<string, string> = {
     Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     "Accept-Language": "en-IN,en;q=0.9",
@@ -268,14 +394,16 @@ export async function fetchAttachmentBuffer(
     "User-Agent": DEFAULT_USER_AGENT,
   };
 
-  const cookieStr = buildCookieHeader(cookies, targetUrl);
-  if (cookieStr) headers.Cookie = cookieStr;
-
-  const response = await fetch(targetUrl.toString(), {
-    method: "GET",
-    headers,
-    redirect: "follow",
-  });
+  const response = await fetchSameOrigin(
+    targetUrl.toString(),
+    {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(20_000),
+    },
+    attachmentHostAllowed,
+    { cookies },
+  );
 
   if (!response.ok) return null;
 

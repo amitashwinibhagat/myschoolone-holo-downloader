@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Frame, Page } from "playwright";
 import { waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
+import { redactPasswordValues } from "./utils.js";
 
 /**
  * Raised when the portal shows a login form but the browser cannot complete
@@ -129,7 +130,24 @@ async function performSignIn(page: Page, username: string, password: string): Pr
 /** Write a screenshot + page HTML snapshot for failure diagnostics. */
 export async function writeFailureDebug(page: Page, label: string): Promise<void> {
   const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700).catch(() => undefined);
   await page.screenshot({ path: path.join(dir, `${label}.png`) }).catch(() => undefined);
-  await fs.writeFile(path.join(dir, "page.html"), await page.content().catch(() => ""));
+  await fs.writeFile(path.join(dir, "page.html"), await sanitizedPageHtml(page), { mode: 0o600 });
+}
+
+/**
+ * Serialized page HTML with any filled password values cleared from the DOM
+ * and redacted from the markup, so debug snapshots never contain credentials.
+ */
+export async function sanitizedPageHtml(page: Page): Promise<string> {
+  await page
+    .evaluate(() => {
+      for (const el of document.querySelectorAll<HTMLInputElement>('input[type="password"]')) {
+        el.value = "";
+        el.removeAttribute("value");
+      }
+    })
+    .catch(() => undefined);
+  return redactPasswordValues(await page.content().catch(() => ""));
 }

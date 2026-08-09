@@ -59,6 +59,23 @@ export function sanitizeFilename(input: string): string {
   return cleaned || "school-photo";
 }
 
+/**
+ * Strip password-input values from serialized HTML before it is written to
+ * disk (e.g. failure debug captures), so a filled login form can never leak
+ * the password into a local file. Defense-in-depth: callers should also clear
+ * the live DOM values before serializing, since browsers serialize the `value`
+ * attribute (default value) and not the current property.
+ */
+export function redactPasswordValues(html: string): string {
+  // Match the whole password input tag (type= anywhere inside it, quoted or
+  // unquoted), then mask any value attribute inside, so attribute order and
+  // quoting style do not matter. `>` inside a quoted value still truncates the
+  // tag match — the DOM-side clearing in sanitizedPageHtml covers live pages.
+  return html.replace(/<input\b[^>]*\btype=(["']?)password\1[^>]*>/gi, (tag) =>
+    tag.replace(/\bvalue=(["']?)[^"'\s>]*\1/gi, 'value="********"'),
+  );
+}
+
 export function extensionForContentType(contentType: string): string {
   const value = contentType.toLowerCase().split(";")[0].trim();
   const map: Record<string, string> = {

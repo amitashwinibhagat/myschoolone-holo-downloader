@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
+import { sanitizedPageHtml } from "./portal.js";
 
 async function main(): Promise<void> {
   const store = new DownloadStore(config.stateDir);
@@ -26,10 +27,15 @@ async function main(): Promise<void> {
       terminal.close();
 
       const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
-      await fs.mkdir(dir, { recursive: true });
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+      await fs.chmod(dir, 0o700).catch(() => undefined);
       await page.screenshot({ path: path.join(dir, "screen.png"), fullPage: false });
-      await fs.writeFile(path.join(dir, "page.html"), await page.content());
-      await fs.writeFile(path.join(dir, "visible-text.txt"), await page.locator("body").innerText().catch(() => ""));
+      await fs.writeFile(path.join(dir, "page.html"), await sanitizedPageHtml(page), { mode: 0o600 });
+      await fs.writeFile(
+        path.join(dir, "visible-text.txt"),
+        await page.locator("body").innerText().catch(() => ""),
+        { mode: 0o600 },
+      );
       console.log(`Debug capture saved in ${dir}`);
     } finally {
       await browser.context.close();

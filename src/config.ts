@@ -43,8 +43,28 @@ function expandHome(input: string): string {
 const profileDir = path.resolve(expandHome(process.env.BROWSER_PROFILE_DIR?.trim() || ".browser-profile"));
 const stateDir = path.resolve(expandHome(process.env.STATE_DIR?.trim() || ".state"));
 
+/** Built-in extra attachment hosts for the MySchoolOne platform (its CDN). */
+const DEFAULT_ATTACHMENT_HOSTS = ["d12sqqae3msmf.cloudfront.net"];
+
+/**
+ * Comma-separated env list of extra attachment hosts, merged with the built-in
+ * fallback. Entries must be bare hostnames (no scheme/port/path); invalid ones
+ * are dropped. When the env var is unset or has no valid entries, only the
+ * fallback list applies.
+ */
+function hostList(name: string, fallback: string[]): string[] {
+  const raw = (process.env[name] ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter((host) => host.length > 0 && !/[\\/:]/.test(host));
+  if (raw.length === 0) return fallback;
+  return [...new Set([...fallback, ...raw])];
+}
+
 export const config = {
-  apiKey: required("HAI_API_KEY"),
+  // Optional: read-only commands (status/summary, Telegram /status) must work
+  // without an AI key. The Holo agent fails fast with a clear error when unset.
+  apiKey: process.env.HAI_API_KEY?.trim() || "",
   schoolUrl: required("SCHOOL_URL"),
   model: process.env.HOLO_MODEL?.trim() || "holo3-1-35b-a3b",
   downloadDir: path.resolve(expandHome(process.env.DOWNLOAD_DIR?.trim() || "~/Pictures/School Updates")),
@@ -87,6 +107,11 @@ export const config = {
   // failed POSTs add bot-score noise against the same IP right before the
   // browser logs in. Enable only if the challenge is removed.
   directPoll: (process.env.DIRECT_POLL?.trim() ?? "false").toLowerCase() === "true",
+  // Extra hosts allowed for attachment downloads beyond the school host and
+  // its subdomains (e.g. the MySchoolOne CloudFront CDN). Comma-separated;
+  // a leading dot also allows subdomains of an entry. Entries are merged with
+  // a built-in default for the MySchoolOne platform CDN.
+  attachmentAllowedHosts: hostList("ATTACHMENT_ALLOWED_HOSTS", DEFAULT_ATTACHMENT_HOSTS),
 };
 
 // Warn early about a misconfigured download location so runs don't silently

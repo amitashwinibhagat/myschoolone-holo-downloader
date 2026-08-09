@@ -23,7 +23,7 @@ test.after(async () => {
 
 let storeCounter = 0;
 /** Each test gets an isolated store so records never leak across tests. */
-async function freshStore(): Promise<DownloadStore> {
+async function freshStore(): Promise<InstanceType<typeof DownloadStore>> {
   const dir = path.join(root, `state-${storeCounter++}`);
   const store = new DownloadStore(dir);
   await store.load();

@@ -49,6 +49,7 @@ async function sendMessage(chatId: number, text: string): Promise<void> {
       text,
       parse_mode: "HTML",
     }),
+    signal: AbortSignal.timeout(20_000),
   }).catch((error) => {
     logError(`Failed to send Telegram message to ${chatId}: ${(error as Error).message}`);
   });
@@ -63,6 +64,8 @@ async function getUpdates(offset: number): Promise<TelegramUpdate[]> {
       limit: 100,
       timeout: 30,
     }),
+    // Telegram long-polling blocks up to `timeout` seconds; allow margin.
+    signal: AbortSignal.timeout(90_000),
   });
   const data = (await response.json()) as GetUpdatesResponse;
   if (!data.ok) {

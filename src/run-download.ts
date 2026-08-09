@@ -116,6 +116,9 @@ async function directAttempt(
   const outcome = await directPollAttachments(lookbackDays);
   let fetchErrors = 0;
 
+  // Load cookies once for the whole batch, not once per day.
+  const cookies = await loadCookies();
+
   for (const dayResult of outcome.results) {
     totals.daysChecked += 1;
     if (dayResult.error) {
@@ -124,9 +127,6 @@ async function directAttempt(
       continue;
     }
     if (dayResult.urls.length === 0) continue;
-
-    // Load cookies once for the batch.
-    const cookies = await loadCookies();
 
     for (const url of dayResult.urls) {
       try {
@@ -215,7 +215,7 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
  *   browser. (When at least one day yielded attachments, the direct result is
  *   trusted even if some days were empty.)
  */
-function directNeedsFallback(totals: RunTotals, outcome: DirectPollOutcome, fetchErrors: number): boolean {
+export function directNeedsFallback(totals: RunTotals, outcome: DirectPollOutcome, fetchErrors: number): boolean {
   if (fetchErrors > 0) return true;
   const anyUrlsFound = totals.saved > 0 || totals.duplicates > 0;
   if (anyUrlsFound) return false;

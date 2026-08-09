@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { ChatCompletion, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { sleep } from "./utils.js";
 
@@ -109,13 +110,23 @@ export const tools = [
 ] as const;
 
 export class HoloClient {
-  private readonly client = new OpenAI({
-    baseURL: "https://api.hcompany.ai/v1/",
-    apiKey: config.apiKey,
-  });
+  private readonly client: OpenAI;
   private previousCallAt = 0;
 
-  async next(messages: any[]): Promise<any> {
+  constructor() {
+    if (!config.apiKey) {
+      throw new Error(
+        "HAI_API_KEY is not set. Copy .env.example to .env and fill it in " +
+          "(or set AI_MODE=none to disable the AI agent entirely).",
+      );
+    }
+    this.client = new OpenAI({
+      baseURL: "https://api.hcompany.ai/v1/",
+      apiKey: config.apiKey,
+    });
+  }
+
+  async next(messages: ChatCompletionMessageParam[]): Promise<ChatCompletion> {
     const elapsed = Date.now() - this.previousCallAt;
     if (elapsed < config.minApiIntervalMs) await sleep(config.minApiIntervalMs - elapsed);
     this.previousCallAt = Date.now();

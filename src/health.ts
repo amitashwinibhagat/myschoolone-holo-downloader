@@ -18,6 +18,7 @@ import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
 import { notify } from "./notify.js";
+import { ensureLoggedIn, NeedsHumanLoginError } from "./portal.js";
 
 const FINGERPRINT_FILE = "portal-fingerprint.json";
 
@@ -226,6 +227,11 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
     const browser = await launchBrowser(downloads);
     try {
       const page = browser.getPage();
+      // Ensure a logged-in session before fingerprinting: an expired session
+      // would otherwise fingerprint the login page, and the two-consecutive
+      // baseline rule could eventually accept it as the new baseline.
+      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await ensureLoggedIn(page);
       const current = await captureFingerprint(page);
       const baseline = await loadBaseline();
       const changes = baseline ? diffFingerprints(baseline, current) : [];
@@ -299,6 +305,13 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
       await browser.context.close().catch(() => undefined);
     }
   } catch (error) {
+    if (error instanceof NeedsHumanLoginError) {
+      return {
+        healthy: false,
+        changed: false,
+        message: `Health check could not run — login required: ${(error as Error).message}`,
+      };
+    }
     return {
       healthy: false,
       changed: false,

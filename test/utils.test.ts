@@ -5,6 +5,7 @@ import {
   dateInIndia,
   indiaTime,
   sanitizeFilename,
+  redactPasswordValues,
   extensionForContentType,
   filenameFromUrl,
   filenameFromDisposition,
@@ -66,4 +67,29 @@ test("filenameFromDisposition: extracts filename from Content-Disposition", () =
   assert.equal(filenameFromDisposition("attachment; filename*=UTF-8''photo%201.jpg"), "photo 1.jpg");
   assert.equal(filenameFromDisposition(undefined), undefined);
   assert.equal(filenameFromDisposition(""), undefined);
+});
+
+test("redactPasswordValues: masks password input values", () => {
+  assert.equal(
+    redactPasswordValues('<input type="password" id="password" value="secret">'),
+    '<input type="password" id="password" value="********">',
+  );
+  assert.equal(
+    redactPasswordValues(`<input id="password" value='secret' type='password'>`),
+    `<input id="password" value="********" type='password'>`,
+  );
+  assert.equal(
+    redactPasswordValues('<input type="PASSWORD" value="Secret123">'),
+    '<input type="PASSWORD" value="********">',
+  );
+});
+
+test("redactPasswordValues: leaves non-password inputs and empty values untouched", () => {
+  assert.equal(redactPasswordValues('<input type="text" value="hello">'), '<input type="text" value="hello">');
+  assert.equal(redactPasswordValues('<input type="password">'), '<input type="password">');
+  assert.equal(redactPasswordValues('<input type="password" value="">'), '<input type="password" value="********">');
+});
+
+test("redactPasswordValues: masks unquoted attributes", () => {
+  assert.equal(redactPasswordValues("<input type=password value=secret>"), '<input type=password value="********">');
 });

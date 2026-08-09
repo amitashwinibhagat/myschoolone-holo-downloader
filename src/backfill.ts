@@ -12,6 +12,7 @@ import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
 import { appFrame, ensureLoggedIn, writeFailureDebug } from "./portal.js";
+import { notify } from "./notify.js";
 
 const PROGRESS_FILE = path.join(config.stateDir, "backfill-progress.json");
 
@@ -173,19 +174,6 @@ async function collectDateLabels(frame: Frame): Promise<string[]> {
   });
 }
 
-async function notify(title: string, message: string): Promise<void> {
-  if (config.telegramBotToken && config.telegramChatId) {
-    await fetch(
-      `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: config.telegramChatId, text: `${title}\n${message}` }),
-      },
-    ).catch(() => undefined);
-  }
-}
-
 async function main(): Promise<void> {
   const { from, to } = parseArgs();
   const chunks = monthChunks(from, to);
@@ -219,42 +207,42 @@ async function main(): Promise<void> {
       const frame = await openPreviousYearLog(page);
 
       for (let i = startIndex; i < chunks.length; i += 1) {
-      const chunk = chunks[i];
-      console.log(`\n[${chunk.label}] Searching ${chunk.start} → ${chunk.end} ...`);
+        const chunk = chunks[i];
+        console.log(`\n[${chunk.label}] Searching ${chunk.start} → ${chunk.end} ...`);
 
-      await searchDateRange(page, appFrame(page), chunk.start, chunk.end);
+        await searchDateRange(page, appFrame(page), chunk.start, chunk.end);
 
-      const currentFrame = appFrame(page);
-      const imageUrls = await collectImageUrls(currentFrame);
-      console.log(`[${chunk.label}] Found ${imageUrls.length} image(s).`);
+        const currentFrame = appFrame(page);
+        const imageUrls = await collectImageUrls(currentFrame);
+        console.log(`[${chunk.label}] Found ${imageUrls.length} image(s).`);
 
-      // Use the month label as the date folder (e.g. "2025-10").
-      for (const url of imageUrls) {
-        try {
-          const result = await downloads.saveFromUrl(page, url, "", chunk.label);
-          if (result.saved) {
-            totals.saved += 1;
-            console.log(`  ✓ ${result.path}`);
-          } else if (result.duplicate) {
-            totals.duplicates += 1;
-          } else if (result.reason) {
-            totals.failures.push(`${chunk.label} ${url.slice(-50)}: ${result.reason}`);
+        // Use the month label as the date folder (e.g. "2025-10").
+        for (const url of imageUrls) {
+          try {
+            const result = await downloads.saveFromUrl(page, url, "", chunk.label);
+            if (result.saved) {
+              totals.saved += 1;
+              console.log(`  ✓ ${result.path}`);
+            } else if (result.duplicate) {
+              totals.duplicates += 1;
+            } else if (result.reason) {
+              totals.failures.push(`${chunk.label} ${url.slice(-50)}: ${result.reason}`);
+            }
+          } catch (error) {
+            totals.failures.push(`${chunk.label} ${url.slice(-50)}: ${(error as Error).message}`);
           }
-        } catch (error) {
-          totals.failures.push(`${chunk.label} ${url.slice(-50)}: ${(error as Error).message}`);
         }
-      }
 
-      totals.monthsProcessed += 1;
-      await saveProgress(chunk.label);
-      console.log(`[${chunk.label}] Done — running total: ${totals.saved} saved, ${totals.duplicates} dupes.`);
+        totals.monthsProcessed += 1;
+        await saveProgress(chunk.label);
+        console.log(`[${chunk.label}] Done — running total: ${totals.saved} saved, ${totals.duplicates} dupes.`);
       }
 
       await downloads.flush();
 
       const summary =
-      `EY1 Backfill complete (${totals.monthsProcessed} months)\n` +
-      `✓ ${totals.saved} new | ${totals.duplicates} duplicates | ${totals.failures.length} failed`;
+        `EY1 Backfill complete (${totals.monthsProcessed} months)\n` +
+        `✓ ${totals.saved} new | ${totals.duplicates} duplicates | ${totals.failures.length} failed`;
       console.log(`\n${summary}`);
       if (totals.failures.length > 0) {
         console.log("\nFailures:");
