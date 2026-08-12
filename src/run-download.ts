@@ -214,12 +214,15 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
  *   file expires, so an all-empty window is always verified once with the
  *   browser. (When at least one day yielded attachments, the direct result is
  *   trusted even if some days were empty.)
+ *
+ * `outcome` (discovery freshness/completeness) is kept in the signature for
+ * diagnostics; the trust decision currently collapses to "verify all-empty
+ * windows regardless of discovery metadata".
  */
 export function directNeedsFallback(totals: RunTotals, outcome: DirectPollOutcome, fetchErrors: number): boolean {
   if (fetchErrors > 0) return true;
   const anyUrlsFound = totals.saved > 0 || totals.duplicates > 0;
   if (anyUrlsFound) return false;
-  if (!outcome.discoveryUsed) return true;
   return true; // whole window empty → verify once with the browser
 }
 

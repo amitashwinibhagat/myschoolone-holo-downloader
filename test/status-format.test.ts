@@ -17,26 +17,18 @@ test("summarize: computes totals, this-week/this-month counts and transport", as
   try {
     const store = new DownloadStore(dir);
     await store.load();
-    const now = Date.now();
-    store.add(record("today", new Date(now).toISOString()));
-    store.add(record("three-days-ago", new Date(now - 3 * 86_400_000).toISOString()));
-    store.add(record("two-months-ago", new Date(now - 60 * 86_400_000).toISOString()));
+    // Fixed reference time so the assertions are deterministic (the Mac's
+    // timezone must not influence the result). 2026-08-15T12:00Z = 17:30 IST.
+    const now = Date.parse("2026-08-15T12:00:00Z");
+    store.add(record("today", "2026-08-15T10:00:00Z")); // this week, this month
+    store.add(record("three-days-ago", "2026-08-12T10:00:00Z")); // this week, this month
+    // 2026-07-31T20:00Z is 2026-08-01 01:30 IST — August in IST, July in most
+    // other timezones. It must count toward this month.
+    store.add(record("ist-boundary", "2026-07-31T20:00:00Z"));
+    store.add(record("two-months-ago", "2026-06-15T10:00:00Z"));
     await store.recordRun({
-      startedAt: new Date(now - 120_000).toISOString(),
-      finishedAt: new Date(now - 60_000).toISOString(),
-      source: "scheduled",
-      mode: "reconcile",
-      transport: "browser",
-      outcome: "failure",
-      saved: 0,
-      duplicates: 0,
-      failures: 1,
-      daysChecked: 0,
-      error: "boom",
-    });
-    await store.recordRun({
-      startedAt: new Date(now - 60_000).toISOString(),
-      finishedAt: new Date(now).toISOString(),
+      startedAt: "2026-08-15T09:00:00Z",
+      finishedAt: "2026-08-15T09:30:00Z",
       source: "scheduled",
       mode: "reconcile",
       transport: "direct",
@@ -47,12 +39,13 @@ test("summarize: computes totals, this-week/this-month counts and transport", as
       daysChecked: 7,
     });
 
-    const summary = summarize(store);
-    assert.equal(summary.total, 3);
+    const summary = summarize(store, now);
+    assert.equal(summary.total, 4);
     assert.equal(summary.thisWeek, 2);
-    assert.equal(summary.thisMonth, 2);
+    assert.equal(summary.thisMonth, 3);
     assert.equal(summary.transport, "direct");
-    assert.equal(summary.failureRate, 50);
+    assert.equal(summary.ranToday, true);
+    assert.equal(summary.failureRate, 0);
     assert.equal(summary.consecutiveFailures, 0); // last run succeeded
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

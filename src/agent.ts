@@ -109,7 +109,10 @@ async function executeTool(name: string, args: Record<string, unknown>, page: Pa
 }
 
 async function writeDebug(page: Page, step: number): Promise<void> {
-  const dir = path.resolve("debug");
+  // Same location and naming scheme as capture.ts / writeFailureDebug, so the
+  // agent's failure captures live under STATE_DIR/debug (covered by
+  // pruneDebugDirs) instead of leaking into the project working directory.
+  const dir = path.join(config.debugDir, new Date().toISOString().replace(/[:.]/g, "-"));
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.chmod(dir, 0o700).catch(() => undefined);
   await page.screenshot({ path: path.join(dir, `failed-step-${step}.png`), fullPage: false }).catch(() => undefined);

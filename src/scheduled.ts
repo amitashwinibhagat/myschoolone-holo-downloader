@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { pingHealthcheck, notify } from "./notify.js";
+import { pingHealthcheck, notify, notifyRunFailure } from "./notify.js";
 import { runJob } from "./run-job.js";
 import { runHealthCheck } from "./health.js";
 import { logInfo, logWarn, logError, pruneDebugDirs } from "./log.js";
@@ -86,21 +86,7 @@ async function main(): Promise<void> {
   // Failure
   const message = error?.message || "Download failed without an error message.";
   logError(`Failed: ${message}`);
-  if (record.outcome === "needs_login") {
-    await notify(
-      "School photos — LOGIN REQUIRED",
-      `The portal session is expired and the browser cannot sign in automatically.\nRun \`npm run login\` to restore it.\n${message.slice(0, 160)}`,
-    );
-  } else {
-    await notify("School photos — FAILED", message.slice(0, 180));
-    if ((consecutiveFailures ?? 0) >= 3) {
-      logWarn(`Failure streak reached ${consecutiveFailures} — escalating to the user.`);
-      await notify(
-        "School photos — ACTION NEEDED",
-        "Multiple consecutive failures. Recovery steps:\n1. npm run login\n2. npm run health\n3. npm run status",
-      );
-    }
-  }
+  await notifyRunFailure(message, record.outcome === "needs_login" ? "needs_login" : "failure", consecutiveFailures ?? 0);
   await pingHealthcheck("fail");
   throw error || new Error(message);
 }

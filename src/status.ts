@@ -3,6 +3,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import { DownloadStore } from "./store.js";
 import { nextRunInfo } from "./schedule-window.js";
+import { isRunLockHeld } from "./run-lock.js";
 import { summarize, formatStatusPlain } from "./status-format.js";
 import { indiaTime } from "./utils.js";
 
@@ -39,7 +40,13 @@ if (mode === "summary") {
 
   const lockPath = path.join(config.stateDir, "run.lock", "owner.json");
   const lock = await fs.readFile(lockPath, "utf8").then(JSON.parse).catch(() => undefined);
-  console.log(`Active lock           : ${lock ? `${lock.mode}/${lock.source} since ${lock.startedAt}` : "none"}`);
+  if (lock) {
+    // A lock owned by a dead process is stale — the next run will clean it up.
+    const active = await isRunLockHeld(config.stateDir);
+    console.log(`Active lock           : ${lock.mode}/${lock.source} since ${lock.startedAt}${active ? "" : " (stale — owning process is dead)"}`);
+  } else {
+    console.log(`Active lock           : none`);
+  }
 
   console.log(`Next schedule         : ${nextRunInfo(indiaTime())}`);
 
