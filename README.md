@@ -14,6 +14,7 @@ when it has to be.
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
 [![Playwright](https://img.shields.io/badge/Playwright-Chrome-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev)
 [![Platform](https://img.shields.io/badge/platform-macOS-black?logo=apple&logoColor=white)](#requirements)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-node--test-3DDC84?logo=node.js&logoColor=white)](#development)
 
 </div>
@@ -178,6 +179,8 @@ npm test        # node --test
 
 Keep changes minimal, add focused tests under `test/`, and see
 [AGENTS.md](AGENTS.md) for contributor/agent conventions.
+
+Released under the [MIT License](LICENSE). Use it, fork it, adapt it to your school's portal.
 
 ---
 
