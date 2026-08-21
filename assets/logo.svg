@@ -1,0 +1,42 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="School Photo Downloader logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="0.55" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="178" y1="210" x2="334" y2="366" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#9333EA"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App tile -->
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+
+  <!-- Soft highlight -->
+  <circle cx="392" cy="120" r="150" fill="#FFFFFF" opacity="0.08"/>
+
+  <!-- Viewfinder bump -->
+  <rect x="202" y="128" width="108" height="64" rx="22" fill="#FFFFFF"/>
+
+  <!-- Camera body -->
+  <rect x="84" y="164" width="344" height="240" rx="40" fill="#FFFFFF"/>
+
+  <!-- Shutter button -->
+  <rect x="356" y="140" width="44" height="14" rx="7" fill="#FFFFFF"/>
+
+  <!-- Lens (cut-out) -->
+  <circle cx="256" cy="284" r="82" fill="url(#lens)"/>
+  <circle cx="256" cy="284" r="82" fill="none" stroke="#EDE9FE" stroke-width="10"/>
+
+  <!-- Download arrow inside the lens -->
+  <g stroke="#FFFFFF" stroke-width="19" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M256 246 V302"/>
+    <path d="M228 278 L256 306 L284 278"/>
+    <path d="M226 326 H286"/>
+  </g>
+
+  <!-- Flash dot -->
+  <circle cx="140" cy="208" r="13" fill="#C4B5FD"/>
+</svg>
