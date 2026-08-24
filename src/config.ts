@@ -68,8 +68,9 @@ export const config = {
   viewportWidth: boundedInteger("VIEWPORT_WIDTH", 1440, 640, 7680),
   viewportHeight: boundedInteger("VIEWPORT_HEIGHT", 1000, 480, 4320),
   lookbackDays: boundedInteger("LOOKBACK_DAYS", 7, 1, 30),
-  minImageWidth: boundedInteger("MIN_IMAGE_WIDTH", 500, 50, 10000),
-  minImageHeight: boundedInteger("MIN_IMAGE_HEIGHT", 350, 50, 10000),
+  // Attachments downloaded in parallel per day (browser + direct paths). Kept
+  // low by default to stay under the portal CDN / Cloudflare rate limits.
+  downloadConcurrency: boundedInteger("DOWNLOAD_CONCURRENCY", 4, 1, 8),
   // Image compression (applied after dedupe, before writing to disk).
   compressImages: (process.env.COMPRESS_IMAGES?.trim() ?? "true").toLowerCase() !== "false",
   maxDimension: boundedInteger("MAX_DIMENSION", 2048, 128, 8192),

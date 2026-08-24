@@ -11,9 +11,9 @@ import {
   loadCookies,
   type DirectPollOutcome,
 } from "./direct-api.js";
-import { appFrame, ensureLoggedIn, NeedsHumanLoginError, writeFailureDebug } from "./portal.js";
+import { appFrame, ensureLoggedIn, NeedsHumanLoginError, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { checkSession } from "./session.js";
-import { dateInIndia, sleep } from "./utils.js";
+import { dateInIndia, mapWithConcurrency, sleep } from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
 const MAX_ATTEMPTS = 2;
@@ -37,65 +37,16 @@ function istDate(daysAgo: number): { iso: string; portal: string } {
   return { iso, portal: `${day}/${month}/${year}` };
 }
 
-async function openDailyLog(page: Page): Promise<Frame> {
-  const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl).toString();
-  const initialFrame = appFrame(page);
-  try {
-    await initialFrame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  } catch (error) {
-    const msg = (error as Error).message || "";
-    const isInterruption =
-      msg.includes("is interrupted by another navigation") ||
-      msg.includes("ERR_ABORTED") ||
-      msg.includes("interrupted") ||
-      msg.includes("net::ERR_ABORTED");
-    if (isInterruption) {
-      console.warn(`Frame navigation interrupted (${msg.split("\n")[0]}) — waiting for wrapper (App.php) to settle...`);
-      // The portal's frameset (App.php) hijacked the navigation. The daily
-      // planner will still be reachable via the sidebar after the wrapper loads.
-      await page.waitForTimeout(5_000);
-      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
-      await page.waitForTimeout(2_000);
-    } else {
-      throw error;
-    }
-  }
-  await page.waitForTimeout(4_000);
-
-  let current = appFrame(page);
-  if ((await current.locator("#dailydate").count().catch(() => 0)) > 0) return current;
-
-  // Daily Log not yet visible — navigate via the sidebar inside App.php wrapper.
-  // This is the stable path when direct frame.goto is blocked by the frameset redirect.
-  try {
-    const sidebar = current.locator("text=/daily\\s*log/i").locator("visible=true").first();
-    await sidebar.waitFor({ state: "visible", timeout: 30_000 });
-    await sidebar.click();
-    await page.waitForTimeout(2_000);
-    // Re-resolve the frame after the first click — the DOM may have rebuilt.
-    current = appFrame(page);
-    const second = current.locator("text=/daily\\s*log/i").locator("visible=true").last();
-    if ((await second.count().catch(() => 0)) > 1) {
-      await second.click().catch(() => undefined);
-    } else {
-      // Fallback: click again if only one match but still not on daily log.
-      await current.locator("text=/daily\\s*log/i").locator("visible=true").first().click().catch(() => undefined);
-    }
-    await page.waitForTimeout(6_000);
-  } catch (error) {
-    console.warn(`Sidebar navigation failed: ${(error as Error).message} — trying direct reload...`);
-    try {
-      const retryFrame = appFrame(page);
-      await retryFrame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-      await page.waitForTimeout(4_000);
-    } catch {
-      /* ignore */
-    }
-  }
-  return appFrame(page);
-}
-
 async function selectDate(page: Page, frame: Frame, portalDate: string): Promise<boolean> {
+  // Arm the AJAX listener BEFORE triggering the load so a fast response
+  // cannot be missed; this replaces a blind 5s sleep with a targeted wait.
+  const ajaxSettled = page
+    .waitForResponse(
+      (response) => response.url().includes("daily_planner_parent_ajax.php") && response.request().method() === "POST",
+      { timeout: 10_000 },
+    )
+    .catch(() => undefined);
+
   const changed = await frame
     .evaluate((value) => {
       const input = document.querySelector<HTMLInputElement>("#dailydate");
@@ -106,8 +57,11 @@ async function selectDate(page: Page, frame: Frame, portalDate: string): Promise
       return true;
     }, portalDate)
     .catch(() => false);
-  if (changed) await page.waitForTimeout(5_000);
-  return changed;
+  if (!changed) return false;
+
+  await ajaxSettled;
+  await page.waitForTimeout(700); // small grace for the DOM to render the response
+  return true;
 }
 
 async function collectAttachmentUrls(frame: Frame): Promise<string[]> {
@@ -124,7 +78,9 @@ async function downloadAll(
   dateLabel: string,
   totals: RunTotals,
 ): Promise<void> {
-  for (const url of urls) {
+  // Download concurrently (capped) for speed. Each task isolates its own
+  // errors into totals.failures so one bad URL never aborts the batch.
+  await mapWithConcurrency(urls, config.downloadConcurrency, async (url) => {
     try {
       const result = await downloads.saveFromUrl(page, url, "", dateLabel);
       if (result.saved) {
@@ -138,7 +94,7 @@ async function downloadAll(
     } catch (error) {
       totals.failures.push(`${url.slice(-40)}: ${(error as Error).message}`);
     }
-  }
+  });
 }
 
 /**
@@ -168,12 +124,13 @@ async function directAttempt(
     }
     if (dayResult.urls.length === 0) continue;
 
-    for (const url of dayResult.urls) {
+    // Concurrent (capped) downloads with per-item error isolation.
+    await mapWithConcurrency(dayResult.urls, config.downloadConcurrency, async (url) => {
       try {
         const downloaded = await fetchAttachmentBuffer(cookies, url);
         if (!downloaded) {
           totals.failures.push(`${url.slice(-40)}: HTTP request failed`);
-          continue;
+          return;
         }
 
         // Determine a reasonable filename from the URL.
@@ -200,7 +157,7 @@ async function directAttempt(
       } catch (error) {
         totals.failures.push(`${url.slice(-40)}: ${(error as Error).message}`);
       }
-    }
+    });
   }
 
   return { totals, outcome, fetchErrors };
@@ -215,7 +172,7 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
     const page = browser.getPage();
     await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await ensureLoggedIn(page);
-    const frame = await openDailyLog(page);
+    const frame = await openDailyLogFrame(page);
     const flushDiscovery = observeDailyLogRequests(page);
 
     try {

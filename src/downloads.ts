@@ -15,8 +15,6 @@ import {
 
 interface CandidateImage {
   url: string;
-  width: number;
-  height: number;
   alt: string;
 }
 
@@ -66,57 +64,9 @@ export class DownloadManager {
     }
   }
 
-  async saveVisibleImages(page: Page): Promise<string> {
-    const candidates = await page.evaluate(({ minWidth, minHeight }) => {
-      const output = new Map<string, CandidateImage>();
-      for (const image of Array.from(document.images)) {
-        const src = image.currentSrc || image.src;
-        const anchor = image.closest("a")?.href;
-        const largeEnough = image.naturalWidth >= minWidth || image.naturalHeight >= minHeight;
-        const urls = largeEnough ? [src, anchor].filter(Boolean) : [anchor].filter(Boolean);
-        for (const url of urls) {
-          if (!url) continue;
-          output.set(url, {
-            url,
-            width: image.naturalWidth,
-            height: image.naturalHeight,
-            alt: image.alt || "",
-          });
-        }
-      }
-      return [...output.values()];
-    }, { minWidth: config.minImageWidth, minHeight: config.minImageHeight });
-
-    if (candidates.length === 0) {
-      return "No large visible images were detected on this screen.";
-    }
-
-    let saved = 0;
-    let duplicates = 0;
-    const failures: string[] = [];
-
-    for (const candidate of candidates) {
-      try {
-        const result = await this.fetchAndSave(page, candidate);
-        if (result.saved) {
-          saved += 1;
-          console.log(`  ✓ Saved ${result.path}`);
-        } else if (result.duplicate) {
-          duplicates += 1;
-        } else if (result.reason) {
-          failures.push(result.reason);
-        }
-      } catch (error) {
-        failures.push(`${candidate.url.slice(0, 90)}: ${(error as Error).message}`);
-      }
-    }
-
-    return `Visible-image scan finished: ${saved} new saved, ${duplicates} duplicates, ${failures.length} skipped/failed.`;
-  }
-
   /** Download a single attachment/image URL directly (deterministic daily run). */
   async saveFromUrl(page: Page, url: string, alt = "", dateLabel?: string): Promise<SaveResult> {
-    return this.fetchAndSave(page, { url, width: 0, height: 0, alt }, dateLabel);
+    return this.fetchAndSave(page, { url, alt }, dateLabel);
   }
 
   /**

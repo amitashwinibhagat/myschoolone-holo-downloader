@@ -9,6 +9,7 @@ import {
   extensionForContentType,
   filenameFromUrl,
   filenameFromDisposition,
+  mapWithConcurrency,
 } from "../src/utils.js";
 
 test("sha256: produces consistent hex hash", () => {
@@ -92,4 +93,44 @@ test("redactPasswordValues: leaves non-password inputs and empty values untouche
 
 test("redactPasswordValues: masks unquoted attributes", () => {
   assert.equal(redactPasswordValues("<input type=password value=secret>"), '<input type=password value="********">');
+});
+
+test("mapWithConcurrency: processes every item and preserves input order", async () => {
+  const items = [1, 2, 3, 4, 5, 6, 7];
+  const results = await mapWithConcurrency(items, 3, async (n) => n * 10);
+  assert.deepEqual(results, [10, 20, 30, 40, 50, 60, 70]);
+});
+
+test("mapWithConcurrency: never exceeds the concurrency cap", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const items = Array.from({ length: 20 }, (_, i) => i);
+  await mapWithConcurrency(items, 4, async () => {
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+  });
+  assert.ok(peak <= 4, `peak in-flight ${peak} exceeded the cap of 4`);
+  assert.ok(peak >= 2, `expected real parallelism, peak was only ${peak}`);
+});
+
+test("mapWithConcurrency: handles empty input and limit larger than item count", async () => {
+  assert.deepEqual(await mapWithConcurrency([], 4, async (n: number) => n), []);
+  assert.deepEqual(await mapWithConcurrency([1, 2], 8, async (n) => n + 1), [2, 3]);
+});
+
+test("mapWithConcurrency: a throwing task does not cancel its siblings when caught per-item", async () => {
+  const seen: number[] = [];
+  const results = await mapWithConcurrency([1, 2, 3, 4], 2, async (n) => {
+    try {
+      if (n === 2) throw new Error("boom");
+      seen.push(n);
+      return `ok-${n}`;
+    } catch {
+      return "failed";
+    }
+  });
+  assert.deepEqual(results, ["ok-1", "failed", "ok-3", "ok-4"]);
+  assert.deepEqual(seen.sort(), [1, 3, 4]);
 });

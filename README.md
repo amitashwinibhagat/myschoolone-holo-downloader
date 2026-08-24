@@ -7,8 +7,8 @@
 **Every photo your school posts — auto-delivered to your iCloud, deduplicated, zero clicks.**
 
 A local macOS automation that watches a MySchoolOne Pro portal and downloads
-photo attachments the moment they appear. Deterministic first, AI-assisted only
-when it has to be.
+photo attachments the moment they appear. Fully deterministic — nothing leaves
+your Mac.
 
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
@@ -44,16 +44,13 @@ Raspberry-Pi-class Mac into a quiet pipeline:
   accepted after **two consecutive** sightings, so a transient Cloudflare
   interstitial never silently rewrites the baseline. You get notified *before*
   downloads break, not after.
-- **🤖 Optional vision-agent rescue** — when the portal redesigns itself, a
-  Holo3.1-powered browser agent can navigate by screenshot as a manual fallback.
-  It is strictly **read-only**: no form submissions, messages or settings changes.
 - **📅 Set-and-forget scheduling** — a macOS LaunchAgent runs weekday mornings
   and evenings (IST), reconciling the last 7 days each time, with an exclusive
   run lock so manual and scheduled runs never collide.
 - **💬 Telegram remote control** — `/run`, `/status`, `/help` from your phone;
   failure alerts ("LOGIN REQUIRED", "ACTION NEEDED") come to you.
-- **🔒 Privacy-first by default** — the daily path sends **no screenshots
-  anywhere**. Credentials, cookies and school data stay on your Mac.
+- **🔒 Privacy-first by default** — no screenshots, no external AI APIs.
+  Credentials, cookies and school data stay on your Mac.
 
 ## 🏗️ Architecture
 
@@ -76,7 +73,6 @@ flowchart LR
 ### Requirements
 
 - macOS with Node.js **20+** (`node --version`)
-- An H Company Models API key *(only for the optional vision agent)*
 - Your school's MySchoolOne Pro URL
 
 ### Install
@@ -141,7 +137,6 @@ read them from there so the plists can't drift from the code.
 | `npm run summary` | Compact status summary |
 | `npm run health` | Fingerprint the portal, compare against baseline |
 | `npm run rescan` | Re-hash the download folder; repair a crashed run's index |
-| `npm run agent` | Manual Holo vision-agent rescue run |
 | `npm run capture` | Save screenshot + HTML of a troublesome page to `debug/` |
 | `npm run telegram-bot` | Run the Telegram bot in the foreground |
 | `npm run check` / `npm test` | Type-check / run the test suite |
@@ -159,13 +154,11 @@ read them from there so the plists can't drift from the code.
 
 ## 🔐 Privacy & safety
 
-- The deterministic daily path sends **nothing** off your machine except the
-  portal's own traffic.
-- Vision-agent screenshots may contain names and photo thumbnails; they go to
-  the model API for inference (zero data retention by default) — use only as a
-  rescue tool, and never share `debug/` captures (they contain children's data).
-- The agent prompt enforces read-only behavior: no messaging, form submission,
-  acknowledgements, setting changes or deletions.
+- The downloader sends **nothing** off your machine except the portal's own
+  traffic — no screenshots, no third-party AI APIs.
+- Never share `debug/` captures: they contain children's data.
+- The browser automation is read-only on the portal: it navigates and downloads
+  attachments, never submits forms, sends messages or changes settings.
 - Secrets (`.env`, cookies, tokens) are gitignored and never logged.
 
 ## 💻 Development

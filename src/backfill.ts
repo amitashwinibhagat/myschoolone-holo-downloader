@@ -11,7 +11,7 @@ import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
-import { appFrame, ensureLoggedIn, writeFailureDebug } from "./portal.js";
+import { appFrame, ensureLoggedIn, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { notify } from "./notify.js";
 
 const PROGRESS_FILE = path.join(config.stateDir, "backfill-progress.json");
@@ -79,45 +79,8 @@ async function saveProgress(monthLabel: string): Promise<void> {
 }
 
 async function openPreviousYearLog(page: Page): Promise<Frame> {
-  // Step 1: Open the Daily Log page (same navigation as daily.ts).
-  const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl).toString();
-  const initialFrame = appFrame(page);
-  try {
-    await initialFrame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  } catch (error) {
-    const msg = (error as Error).message || "";
-    const isInterruption =
-      msg.includes("is interrupted by another navigation") ||
-      msg.includes("ERR_ABORTED") ||
-      msg.includes("interrupted") ||
-      msg.includes("net::ERR_ABORTED");
-    if (isInterruption) {
-      console.warn(`Frame navigation interrupted (${msg.split("\n")[0]}) — waiting for wrapper (App.php) to settle...`);
-      await page.waitForTimeout(5_000);
-      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
-      await page.waitForTimeout(2_000);
-    } else {
-      throw error;
-    }
-  }
-  await page.waitForTimeout(4_000);
-
-  let current = appFrame(page);
-  // If Daily Log not yet visible, navigate via sidebar inside App.php wrapper.
-  if ((await current.locator("#dailydate").count().catch(() => 0)) === 0) {
-    try {
-      const sidebar = current.locator("text=/daily\\s*log/i").locator("visible=true").first();
-      await sidebar.waitFor({ state: "visible", timeout: 30_000 });
-      await sidebar.click();
-      await page.waitForTimeout(2_000);
-      current = appFrame(page);
-      await current.locator("text=/daily\\s*log/i").locator("visible=true").last().click().catch(() => undefined);
-      await page.waitForTimeout(4_000);
-      current = appFrame(page);
-    } catch {
-      /* will check below */
-    }
-  }
+  // Step 1: Open the Daily Log page (shared navigation, same as the daily run).
+  const current = await openDailyLogFrame(page);
 
   // Step 2: Click the "Previous year log" tab (3rd tab on the page).
   const tab = current.locator("text=/previous\\s*year\\s*log/i").first();

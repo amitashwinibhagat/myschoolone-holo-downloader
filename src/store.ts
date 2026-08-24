@@ -9,10 +9,10 @@ export interface DownloadRecord {
   downloadedAt: string;
 }
 
-export type RunMode = "fast" | "reconcile" | "manual" | "agent";
+export type RunMode = "fast" | "reconcile" | "manual";
 export type RunSource = "scheduled" | "manual" | "telegram";
 export type RunTransport = "browser" | "direct" | "browser-fallback";
-export type RunOutcome = "success" | "failure" | "skipped_locked" | "off_hours" | "needs_login";
+export type RunOutcome = "success" | "failure" | "skipped_locked" | "needs_login";
 
 export interface RunRecord {
   startedAt: string;

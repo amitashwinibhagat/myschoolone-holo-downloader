@@ -22,6 +22,60 @@ export function appFrame(page: Page): Frame {
   return page.frames().find((frame) => frame !== page.mainFrame()) || page.mainFrame();
 }
 
+/** Portal path of the Daily Log (daily planner) page. */
+export const DAILY_LOG_PATH = "/Web/LearningManagement/daily_planner_parent.php";
+
+/** True when a frame/page navigation was aborted by a competing navigation. */
+export function isNavigationInterrupted(error: unknown): boolean {
+  const message = (error as Error)?.message || "";
+  return /interrupted by another navigation|ERR_ABORTED/.test(message);
+}
+
+/**
+ * Navigate to the Daily Log page and return the frame that contains it.
+ *
+ * The portal serves the planner inside an `App.php` frameset wrapper. A direct
+ * `frame.goto()` to the planner URL is frequently hijacked by a top-level
+ * redirect back to `App.php`, which Playwright surfaces as an interrupted
+ * navigation (`ERR_ABORTED`). When that happens we let the wrapper settle and
+ * fall back to clicking the "Daily Log" entry in the sidebar — the stable
+ * in-app route. Shared by the daily run and the backfill so the behaviour
+ * cannot drift between them.
+ */
+export async function openDailyLogFrame(page: Page): Promise<Frame> {
+  const url = new URL(DAILY_LOG_PATH, config.schoolUrl).toString();
+
+  try {
+    await appFrame(page).goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  } catch (error) {
+    if (!isNavigationInterrupted(error)) throw error;
+    console.warn("Frame navigation interrupted by the App.php wrapper — waiting for it to settle...");
+    await page.waitForTimeout(5_000);
+    await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+    await page.waitForTimeout(2_000);
+  }
+  await page.waitForTimeout(4_000);
+
+  let frame = appFrame(page);
+  if ((await frame.locator("#dailydate").count().catch(() => 0)) > 0) return frame;
+
+  // Not on the planner yet — route through the sidebar inside the wrapper.
+  const link = frame.locator("text=/daily\\s*log/i").locator("visible=true");
+  await link.first().waitFor({ state: "visible", timeout: 30_000 });
+  await link.first().click();
+  await page.waitForTimeout(2_000);
+
+  // The sidebar expands into a parent item plus a submenu. When more than one
+  // "Daily Log" entry is visible, click the deepest (submenu) one.
+  frame = appFrame(page);
+  const matches = frame.locator("text=/daily\\s*log/i").locator("visible=true");
+  if ((await matches.count().catch(() => 0)) > 1) {
+    await matches.last().click().catch(() => undefined);
+    await page.waitForTimeout(6_000);
+  }
+  return appFrame(page);
+}
+
 /**
  * Wait for any Cloudflare challenge to clear and, if a login form is showing,
  * sign in automatically. Credentials come from SCHOOL_USERNAME/SCHOOL_PASSWORD
