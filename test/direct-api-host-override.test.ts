@@ -7,7 +7,6 @@ import test from "node:test";
 // node --test isolates each file in its own process, so this file gets a fresh
 // config singleton with an overridden attachment-host allowlist.
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-direct-api-override-"));
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = path.join(root, "state");
 process.env.ATTACHMENT_ALLOWED_HOSTS = "custom-cdn.example.com,.static.example.org";

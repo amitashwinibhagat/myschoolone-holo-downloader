@@ -23,7 +23,6 @@ if (mode === "summary") {
   const lastRun = data.lastSuccessfulRunAt;
   console.log(`Download folder       : ${config.downloadDir}`);
   console.log(`State folder          : ${config.stateDir}`);
-  console.log(`AI mode               : ${config.aiMode}`);
   console.log(`Total photos          : ${records.length}`);
   console.log(`Last good run         : ${lastRun ? new Date(lastRun).toLocaleString() : "never"}${summary.ranToday ? " (today ✓)" : ""}`);
   console.log(`Last scheduled attempt: ${data.lastScheduledAttemptAt ? new Date(data.lastScheduledAttemptAt).toLocaleString() : "never"}`);

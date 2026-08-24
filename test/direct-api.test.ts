@@ -8,7 +8,6 @@ import type { Cookie } from "../src/direct-api.js";
 // Config is a module-level singleton loaded from env, so configure it before
 // importing the module under test (same pattern as downloads.test.ts).
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-direct-api-"));
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = path.join(root, "state");
 

@@ -13,13 +13,11 @@ import test from "node:test";
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-e2e-"));
 const STATE_DIR = path.join(root, "state");
 const DOWNLOAD_DIR = path.join(root, "downloads");
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = STATE_DIR;
 process.env.DOWNLOAD_DIR = DOWNLOAD_DIR;
 process.env.DIRECT_POLL = "true";
 process.env.COMPRESS_IMAGES = "false";
-process.env.AI_MODE = "none";
 
 const { runDownload } = await import("../src/run-download.js");
 const { runJob } = await import("../src/run-job.js");

@@ -25,15 +25,6 @@ function boundedInteger(name: string, fallback: number, min: number, max: number
   return value;
 }
 
-function enumValue<T extends string>(name: string, fallback: T, allowed: readonly T[]): T {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  if (!allowed.includes(raw as T)) {
-    throw new Error(`${name} must be one of: ${allowed.join(", ")} (got "${raw}").`);
-  }
-  return raw as T;
-}
-
 function expandHome(input: string): string {
   if (input === "~") return os.homedir();
   if (input.startsWith("~/")) return path.join(os.homedir(), input.slice(2));
@@ -62,11 +53,7 @@ function hostList(name: string, fallback: string[]): string[] {
 }
 
 export const config = {
-  // Optional: read-only commands (status/summary, Telegram /status) must work
-  // without an AI key. The Holo agent fails fast with a clear error when unset.
-  apiKey: process.env.HAI_API_KEY?.trim() || "",
   schoolUrl: required("SCHOOL_URL"),
-  model: process.env.HOLO_MODEL?.trim() || "holo3-1-35b-a3b",
   downloadDir: path.resolve(expandHome(process.env.DOWNLOAD_DIR?.trim() || "~/Pictures/School Updates")),
   profileDir,
   stateDir,
@@ -80,9 +67,7 @@ export const config = {
   headless: process.env.HEADLESS?.toLowerCase() === "true",
   viewportWidth: boundedInteger("VIEWPORT_WIDTH", 1440, 640, 7680),
   viewportHeight: boundedInteger("VIEWPORT_HEIGHT", 1000, 480, 4320),
-  maxSteps: boundedInteger("MAX_STEPS", 80, 1, 500),
   lookbackDays: boundedInteger("LOOKBACK_DAYS", 7, 1, 30),
-  minApiIntervalMs: integer("MIN_API_INTERVAL_MS", 6500),
   minImageWidth: boundedInteger("MIN_IMAGE_WIDTH", 500, 50, 10000),
   minImageHeight: boundedInteger("MIN_IMAGE_HEIGHT", 350, 50, 10000),
   // Image compression (applied after dedupe, before writing to disk).
@@ -93,9 +78,6 @@ export const config = {
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
   healthcheckUrl: process.env.HEALTHCHECK_URL?.trim() || "",
-  // AI mode: "auto" uses the Holo agent for complex navigation, "none" forces
-  // deterministic-only operation (no screenshots sent to external APIs).
-  aiMode: enumValue("AI_MODE", "auto", ["auto", "none"] as const),
   // Optional portal credentials for fully automatic re-login when the session
   // expires. When set, the deterministic path can sign back in without
   // depending on Chrome's (unreliable in automation) password autofill.

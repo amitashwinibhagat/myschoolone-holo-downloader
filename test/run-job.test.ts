@@ -6,7 +6,6 @@ import test from "node:test";
 
 // run-job imports config, so env must be present before the module loads
 // (CI has no .env file).
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = "";
 

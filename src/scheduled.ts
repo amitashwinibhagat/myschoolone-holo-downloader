@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   const lookbackDays = lookbackForMode(effectiveMode);
 
   if (dryRun) {
-    logInfo(`Dry run: weekday, mode=${effectiveMode}, ${lookbackDays}-day lookback, ai=${config.aiMode}.`);
+    logInfo(`Dry run: weekday, mode=${effectiveMode}, ${lookbackDays}-day lookback.`);
     return;
   }
 

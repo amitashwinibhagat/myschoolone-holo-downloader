@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   // The Telegram bot spawns daily.ts with --notify-summary so a successful run
   // always reports back, even when nothing new was saved.
   const notifySummary = process.argv.includes("--notify-summary");
-  logInfo(`Manual run starting (lookback=${lookbackDays} days, ai=${config.aiMode}).`);
+  logInfo(`Manual run starting (lookback=${lookbackDays} days).`);
 
   const { record, result, skipped, lockOwner, error, consecutiveFailures } = await runJob({
     source: "manual",

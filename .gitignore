@@ -4,6 +4,7 @@ node_modules/
 .state/
 debug/
 dist/
+.vscode/
 *.log
 .DS_Store
 .kilo/

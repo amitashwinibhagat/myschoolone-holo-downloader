@@ -3,13 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Hybrid Holo3.1 + Playwright downloader for MySchoolOne Pro photo attachments.",
+  "description": "Playwright downloader for MySchoolOne Pro photo attachments.",
   "scripts": {
     "login": "tsx src/login.ts",
     "daily": "tsx src/daily.ts",
     "status": "tsx src/status.ts",
     "summary": "tsx src/status.ts --summary",
-    "agent": "tsx src/agent.ts",
     "scheduled": "tsx src/scheduled.ts",
     "telegram-bot": "tsx src/telegram-bot.ts",
     "capture": "tsx src/capture.ts",
@@ -21,7 +20,6 @@
   },
   "dependencies": {
     "dotenv": "^17.2.1",
-    "openai": "^5.10.2",
     "playwright": "^1.54.1",
     "sharp": "^0.35.3"
   },

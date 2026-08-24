@@ -7,7 +7,6 @@ import test from "node:test";
 // Config is a module-level singleton loaded from env, so configure it before
 // importing the downloader modules. Compression is ON here.
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-dl-compress-"));
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.DOWNLOAD_DIR = path.join(root, "downloads");
 process.env.STATE_DIR = path.join(root, "state");

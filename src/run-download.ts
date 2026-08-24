@@ -39,19 +39,59 @@ function istDate(daysAgo: number): { iso: string; portal: string } {
 
 async function openDailyLog(page: Page): Promise<Frame> {
   const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl).toString();
-  const frame = appFrame(page);
-  await frame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  const initialFrame = appFrame(page);
+  try {
+    await initialFrame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  } catch (error) {
+    const msg = (error as Error).message || "";
+    const isInterruption =
+      msg.includes("is interrupted by another navigation") ||
+      msg.includes("ERR_ABORTED") ||
+      msg.includes("interrupted") ||
+      msg.includes("net::ERR_ABORTED");
+    if (isInterruption) {
+      console.warn(`Frame navigation interrupted (${msg.split("\n")[0]}) — waiting for wrapper (App.php) to settle...`);
+      // The portal's frameset (App.php) hijacked the navigation. The daily
+      // planner will still be reachable via the sidebar after the wrapper loads.
+      await page.waitForTimeout(5_000);
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+      await page.waitForTimeout(2_000);
+    } else {
+      throw error;
+    }
+  }
   await page.waitForTimeout(4_000);
 
-  const current = appFrame(page);
+  let current = appFrame(page);
   if ((await current.locator("#dailydate").count().catch(() => 0)) > 0) return current;
 
-  const sidebar = current.locator("text=/daily\\s*log/i").locator("visible=true").first();
-  await sidebar.waitFor({ state: "visible", timeout: 30_000 });
-  await sidebar.click();
-  await page.waitForTimeout(2_000);
-  await current.locator("text=/daily\\s*log/i").locator("visible=true").last().click();
-  await page.waitForTimeout(6_000);
+  // Daily Log not yet visible — navigate via the sidebar inside App.php wrapper.
+  // This is the stable path when direct frame.goto is blocked by the frameset redirect.
+  try {
+    const sidebar = current.locator("text=/daily\\s*log/i").locator("visible=true").first();
+    await sidebar.waitFor({ state: "visible", timeout: 30_000 });
+    await sidebar.click();
+    await page.waitForTimeout(2_000);
+    // Re-resolve the frame after the first click — the DOM may have rebuilt.
+    current = appFrame(page);
+    const second = current.locator("text=/daily\\s*log/i").locator("visible=true").last();
+    if ((await second.count().catch(() => 0)) > 1) {
+      await second.click().catch(() => undefined);
+    } else {
+      // Fallback: click again if only one match but still not on daily log.
+      await current.locator("text=/daily\\s*log/i").locator("visible=true").first().click().catch(() => undefined);
+    }
+    await page.waitForTimeout(6_000);
+  } catch (error) {
+    console.warn(`Sidebar navigation failed: ${(error as Error).message} — trying direct reload...`);
+    try {
+      const retryFrame = appFrame(page);
+      await retryFrame.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+      await page.waitForTimeout(4_000);
+    } catch {
+      /* ignore */
+    }
+  }
   return appFrame(page);
 }
 

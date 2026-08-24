@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 // session.ts imports config, so env must be present before the module loads.
-process.env.HAI_API_KEY = "test-key";
 process.env.SCHOOL_URL = "https://school.example.com";
 
 const { classifySessionBody } = await import("../src/session.js");
