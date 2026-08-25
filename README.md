@@ -118,7 +118,7 @@ Photos arrive under `$DOWNLOAD_DIR/YYYY-MM-DD/`. That's the whole loop.
 Once manual runs work:
 
 ```bash
-./scripts/install-launch-agent.sh            # downloader: weekdays 9 AM & 3 PM IST
+./scripts/install-launch-agent.sh            # downloader: weekdays 3 PM & 9 PM IST
 ./scripts/install-telegram-bot-launch-agent.sh  # Telegram bot, auto-restarts
 ```
 
