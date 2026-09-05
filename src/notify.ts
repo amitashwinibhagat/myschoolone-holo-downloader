@@ -7,12 +7,22 @@ const exec = promisify(execFile);
 
 export async function notify(title: string, message: string): Promise<void> {
   if (config.telegramBotToken && config.telegramChatId) {
-    await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: config.telegramChatId, text: `${title}\n${message}` }),
-      signal: AbortSignal.timeout(20_000),
-    }).catch(() => undefined);
+    // Best-effort: a dead token or rate limit must never break a run, but it
+    // must not fail silently either — otherwise the user believes alerts work
+    // while none arrive.
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: config.telegramChatId, text: `${title}\n${message}` }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!response.ok) {
+        logWarn(`Telegram notification failed: HTTP ${response.status} for "${title}".`);
+      }
+    } catch (error) {
+      logWarn(`Telegram notification failed for "${title}": ${(error as Error).message}`);
+    }
     return;
   }
 
@@ -26,11 +36,15 @@ export async function notify(title: string, message: string): Promise<void> {
  * message plus an ACTION NEEDED escalation once the failure streak reaches 3.
  * Shared by the manual (daily.ts) and scheduled (scheduled.ts) entry points so
  * the message text cannot drift between them.
+ *
+ * `hint` (from runJob) is prepended so the next step survives the
+ * notification length cap even when the raw error is long.
  */
 export async function notifyRunFailure(
   message: string,
   outcome: "needs_login" | "failure",
   consecutiveFailures: number,
+  hint?: string,
 ): Promise<void> {
   if (outcome === "needs_login") {
     await notify(
@@ -39,7 +53,8 @@ export async function notifyRunFailure(
     );
     return;
   }
-  await notify("School photos — FAILED", message.slice(0, 180));
+  const text = hint ? `${hint}\n${message}` : message;
+  await notify("School photos — FAILED", text.slice(0, 180));
   if (consecutiveFailures >= 3) {
     logWarn(`Failure streak reached ${consecutiveFailures} — escalating to the user.`);
     await notify(

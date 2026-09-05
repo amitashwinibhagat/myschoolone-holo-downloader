@@ -14,6 +14,19 @@ export interface StatusSummary {
   consecutiveFailures: number;
   transport: string;
   nextRun: string;
+  /** One-line next step so every status tells the user what to do (if anything). */
+  action: string;
+}
+
+/** Derive the user's next step from recent run history. Pure — safe to unit-test. */
+export function nextAction(runs: Array<{ outcome: string }>, consecutiveFailures: number): string {
+  const last = runs[runs.length - 1];
+  if (!last) return "Run `npm run daily` to fetch photos for the first time.";
+  if (last.outcome === "needs_login") return "Run `npm run login` to restore the portal session.";
+  if (consecutiveFailures >= 3) return "Multiple failures — run `npm run login`, then `npm run health`.";
+  if (last.outcome === "failure") return "Last run failed — rerun; if it persists, run `npm run health`.";
+  if (last.outcome === "skipped_locked") return "A run is in progress or a stale lock exists — wait a few minutes, then rerun.";
+  return "All good — photos are flowing.";
 }
 
 const WEEK_MS = 7 * 86_400_000;
@@ -42,6 +55,7 @@ export function summarize(store: DownloadStore, now = Date.now()): StatusSummary
   const recentRuns = (data.runs ?? []).slice(-20);
   const failedRuns = recentRuns.filter((r) => r.outcome === "failure" || r.outcome === "needs_login").length;
   const failureRate = recentRuns.length > 0 ? Math.round((failedRuns / recentRuns.length) * 100) : 0;
+  const consecutiveFailures = data.consecutiveFailures || 0;
 
   return {
     total: records.length,
@@ -52,9 +66,10 @@ export function summarize(store: DownloadStore, now = Date.now()): StatusSummary
     failureRate,
     failedRuns,
     recentRunCount: recentRuns.length,
-    consecutiveFailures: data.consecutiveFailures || 0,
+    consecutiveFailures,
     transport: data.lastTransport || "unknown",
     nextRun: nextRunInfo(indiaTime(new Date(now))),
+    action: nextAction(data.runs ?? [], consecutiveFailures),
   };
 }
 
@@ -64,6 +79,7 @@ export function formatStatusPlain(summary: StatusSummary): string {
     `📸 Total: ${summary.total} | This week: ${summary.thisWeek} | This month: ${summary.thisMonth}`,
     `✅ Last run: ${summary.lastRun} | Failures: ${summary.failureRate}% (${summary.consecutiveFailures} streak)`,
     `🔧 Transport: ${summary.transport} | Next: ${summary.nextRun}`,
+    `➡️ ${summary.action}`,
   ].join("\n");
 }
 
@@ -79,5 +95,6 @@ export function formatStatusHtml(summary: StatusSummary): string {
     `Failure rate: ${summary.failureRate}% (${summary.consecutiveFailures} streak)`,
     `Transport: ${summary.transport}`,
     `Next run: ${summary.nextRun}`,
+    `Next step: ${summary.action}`,
   ].join("\n");
 }

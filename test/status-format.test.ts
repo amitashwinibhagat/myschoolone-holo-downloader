@@ -98,3 +98,52 @@ test("formatStatusPlain and formatStatusHtml render the summary", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+async function storeWithRuns(runs: RunRecord[]): Promise<DownloadStore> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-summary-"));
+  const store = new DownloadStore(dir);
+  await store.load();
+  for (const run of runs) await store.recordRun(run);
+  return store;
+}
+
+function run(outcome: RunRecord["outcome"]): RunRecord {
+  return {
+    startedAt: "2026-08-15T09:00:00Z",
+    finishedAt: "2026-08-15T09:30:00Z",
+    source: "scheduled",
+    mode: "reconcile",
+    transport: "browser",
+    outcome,
+    saved: 0,
+    duplicates: 0,
+    failures: outcome === "success" ? 0 : 1,
+    daysChecked: outcome === "success" ? 7 : 0,
+  };
+}
+
+test("summarize: action tells a fresh user to run daily", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-summary-"));
+  try {
+    const store = new DownloadStore(dir);
+    await store.load();
+    assert.ok(summarize(store).action.includes("npm run daily"));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("summarize: action points at login after needs_login, and stays calm on success", async () => {
+  const loginStore = await storeWithRuns([run("needs_login")]);
+  assert.ok(summarize(loginStore).action.includes("npm run login"));
+
+  const okStore = await storeWithRuns([run("success")]);
+  assert.ok(summarize(okStore).action.includes("All good"));
+});
+
+test("summarize: action escalates after three consecutive failures", async () => {
+  const store = await storeWithRuns([run("failure"), run("failure"), run("failure")]);
+  const summary = summarize(store);
+  assert.equal(summary.consecutiveFailures, 3);
+  assert.ok(summary.action.includes("npm run health"));
+});

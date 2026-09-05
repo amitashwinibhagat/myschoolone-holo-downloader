@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { runDownload, type RunDownloadResult } from "./run-download.js";
 import { acquireRunLock, type RunLock } from "./run-lock.js";
 import { NeedsHumanLoginError } from "./portal.js";
+import { actionableHintFor } from "./utils.js";
 import { DownloadStore, type RunMode, type RunRecord, type RunSource } from "./store.js";
 
 export interface RunJobInput {
@@ -23,6 +24,13 @@ export interface RunJobOutput {
   lock: RunLock;
   /** Current consecutive-failure streak after this run (from the store). */
   consecutiveFailures?: number;
+  /**
+   * One-line next step for the user when the run failed with a cryptic
+   * error. Undefined for successes, skips, login-required outcomes (which
+   * have their own dedicated flow), and self-explanatory errors. Callers
+   * surface it in notifications alongside the raw message.
+   */
+  hint?: string;
 }
 
 export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
@@ -101,7 +109,10 @@ export async function runJob(input: RunJobInput): Promise<RunJobOutput> {
       error: message,
     };
     await store.recordRun(record);
-    return { ok: false, record, error: error as Error, skipped: false, lock, consecutiveFailures: store.snapshot().consecutiveFailures };
+    // Login-required failures already get a dedicated LOGIN REQUIRED
+    // notification; only hint at cryptic errors that need translation.
+    const hint = loginRequired ? undefined : actionableHintFor(error);
+    return { ok: false, record, error: error as Error, skipped: false, lock, consecutiveFailures: store.snapshot().consecutiveFailures, hint };
   } finally {
     await lock.release();
   }

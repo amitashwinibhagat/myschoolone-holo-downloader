@@ -67,7 +67,19 @@ export class DownloadStore {
       this.data.runs ??= [];
       this.hashes = new Set(this.data.records.map((r) => r.hash));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if (error instanceof SyntaxError) {
+        // A crash or full disk mid-write can leave half-written JSON behind.
+        // Quarantine it (never delete user data) and start empty so every
+        // command keeps working; `npm run rescan` rebuilds the hash index.
+        const backup = `${this.filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        await fs.rename(this.filePath, backup).catch(() => undefined);
+        console.warn(`Download index was corrupt — moved to ${backup} and starting fresh.`);
+        this.data = { records: [], runs: [] };
+        this.hashes = new Set();
+        return;
+      }
+      throw error;
     }
   }
 

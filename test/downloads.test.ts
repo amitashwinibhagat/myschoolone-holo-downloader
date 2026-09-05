@@ -12,7 +12,7 @@ process.env.DOWNLOAD_DIR = path.join(root, "downloads");
 process.env.STATE_DIR = path.join(root, "state");
 process.env.COMPRESS_IMAGES = "false";
 
-const { DownloadManager } = await import("../src/downloads.js");
+const { DownloadManager, isTransientDownloadFailure } = await import("../src/downloads.js");
 const { DownloadStore } = await import("../src/store.js");
 const { sha256 } = await import("../src/utils.js");
 
@@ -88,4 +88,102 @@ test("saveFromBuffer: stats counter tracks saved/duplicates", async () => {
   await manager.saveFromBuffer(body, "https://school.example.com/s.jpg", "image/jpeg", "s.jpg", "2026-08-01");
   await manager.saveFromBuffer(imageBuffer("fff"), "https://school.example.com/t.jpg", "image/jpeg", "t.jpg", "2026-08-01");
   assert.deepEqual(manager.stats(), { saved: 2, duplicates: 1 });
+});
+
+test("isTransientDownloadFailure: retries rate limits, 5xx, and no-response failures", () => {
+  assert.equal(isTransientDownloadFailure(429), true);
+  assert.equal(isTransientDownloadFailure(500), true);
+  assert.equal(isTransientDownloadFailure(503), true);
+  assert.equal(isTransientDownloadFailure(undefined), true);
+});
+
+test("isTransientDownloadFailure: permanent failures are not retried", () => {
+  assert.equal(isTransientDownloadFailure(200), false);
+  assert.equal(isTransientDownloadFailure(400), false);
+  assert.equal(isTransientDownloadFailure(403), false);
+  assert.equal(isTransientDownloadFailure(404), false);
+});
+
+type FetchStep = { status: number; ok: boolean; error?: string };
+
+/** Stub of the Playwright Page surface that saveFromUrl touches. */
+function stubImagePage(script: FetchStep[], seen: { calls: number }, seed: string) {
+  return {
+    url: () => "https://school.example.com/Web/LearningManagement/daily_planner_parent.php",
+    context: () => ({
+      request: {
+        get: async () => {
+          const step = script[Math.min(seen.calls, script.length - 1)];
+          seen.calls += 1;
+          if (step.error) throw new Error(step.error);
+          return {
+            ok: () => step.ok,
+            status: () => step.status,
+            headers: () => ({
+              "content-type": step.ok ? "image/jpeg" : "text/html",
+              "content-disposition": "",
+            }),
+            body: async () => imageBuffer(`${seed}-${seen.calls}`),
+          };
+        },
+      },
+    }),
+  };
+}
+
+test("saveFromUrl: retries a transient 503 then saves", async () => {
+  const store = await freshStore();
+  const manager = new DownloadManager(store);
+  const seen = { calls: 0 };
+  const result = await manager.saveFromUrl(
+    stubImagePage(
+      [
+        { status: 503, ok: false },
+        { status: 200, ok: true },
+      ],
+      seen,
+      "retry503",
+    ) as never,
+    "https://school.example.com/UploadFiles/school/photo.jpg",
+    "",
+    "2026-08-02",
+  );
+  assert.equal(result.saved, true);
+  assert.equal(seen.calls, 2);
+});
+
+test("saveFromUrl: retries a thrown network error then saves", async () => {
+  const store = await freshStore();
+  const manager = new DownloadManager(store);
+  const seen = { calls: 0 };
+  const result = await manager.saveFromUrl(
+    stubImagePage(
+      [
+        { status: 0, ok: false, error: "ECONNRESET" },
+        { status: 200, ok: true },
+      ],
+      seen,
+      "retrynet",
+    ) as never,
+    "https://school.example.com/UploadFiles/school/photo.jpg",
+    "",
+    "2026-08-02",
+  );
+  assert.equal(result.saved, true);
+  assert.equal(seen.calls, 2);
+});
+
+test("saveFromUrl: does not retry a permanent 404", async () => {
+  const store = await freshStore();
+  const manager = new DownloadManager(store);
+  const seen = { calls: 0 };
+  const result = await manager.saveFromUrl(
+    stubImagePage([{ status: 404, ok: false }], seen, "retry404") as never,
+    "https://school.example.com/UploadFiles/school/missing.jpg",
+    "",
+    "2026-08-02",
+  );
+  assert.equal(result.saved, false);
+  assert.match(result.reason || "", /HTTP 404/);
+  assert.equal(seen.calls, 1);
 });

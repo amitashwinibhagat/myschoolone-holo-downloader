@@ -25,10 +25,21 @@ export function appFrame(page: Page): Frame {
 /** Portal path of the Daily Log (daily planner) page. */
 export const DAILY_LOG_PATH = "/Web/LearningManagement/daily_planner_parent.php";
 
-/** True when a frame/page navigation was aborted by a competing navigation. */
+/**
+ * True when a frame/page navigation was aborted by a competing navigation.
+ *
+ * Also matches the detached-frame race: the portal's `App.php` frameset
+ * wrapper can rebuild its sub-frames while `frame.goto()` is in flight,
+ * which Playwright surfaces as `Protocol error (Page.navigate): No frame
+ * with given id found` instead of the usual interrupted-navigation error.
+ * Both mean the same thing (the wrapper hijacked the navigation), so both
+ * follow the same settle-and-use-the-sidebar recovery path.
+ */
 export function isNavigationInterrupted(error: unknown): boolean {
   const message = (error as Error)?.message || "";
-  return /interrupted by another navigation|ERR_ABORTED/.test(message);
+  return /interrupted by another navigation|ERR_ABORTED|No frame with given id found|Frame has been detached/.test(
+    message,
+  );
 }
 
 /**
@@ -37,7 +48,9 @@ export function isNavigationInterrupted(error: unknown): boolean {
  * The portal serves the planner inside an `App.php` frameset wrapper. A direct
  * `frame.goto()` to the planner URL is frequently hijacked by a top-level
  * redirect back to `App.php`, which Playwright surfaces as an interrupted
- * navigation (`ERR_ABORTED`). When that happens we let the wrapper settle and
+ * navigation (`ERR_ABORTED`) or a detached-frame protocol error (`No frame
+ * with given id found`) when the wrapper rebuilds its sub-frames mid-flight.
+ * When that happens we let the wrapper settle and
  * fall back to clicking the "Daily Log" entry in the sidebar — the stable
  * in-app route. Shared by the daily run and the backfill so the behaviour
  * cannot drift between them.
@@ -73,7 +86,32 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
     await matches.last().click().catch(() => undefined);
     await page.waitForTimeout(6_000);
   }
-  return appFrame(page);
+  const finalFrame = appFrame(page);
+  if ((await finalFrame.locator("#dailydate").count().catch(() => 0)) === 0) {
+    // Never hand back a frame that is not the planner: downstream code would
+    // silently harvest the wrong view into a mislabeled date folder. Fail
+    // loudly so the run retries, captures failure debug, and notifies.
+    throw new Error(
+      "Daily Log page did not load (no date picker found after navigation). " +
+        "The portal layout may have changed — run `npm run health` and `npm run capture`.",
+    );
+  }
+  return finalFrame;
+}
+
+/**
+ * True when the portal is showing its login form: either the "I'm not a
+ * robot" challenge text or the username field is visible. Checking both
+ * keeps auto-login working when the portal rewords its challenge but keeps
+ * the same form fields (and vice versa).
+ */
+export async function isLoginFormVisible(page: Page, timeoutMs = 3_000): Promise<boolean> {
+  const robot = await page
+    .getByText("I'm not a robot")
+    .isVisible({ timeout: timeoutMs })
+    .catch(() => false);
+  if (robot) return true;
+  return page.locator("#user_names").isVisible({ timeout: timeoutMs }).catch(() => false);
 }
 
 /**
@@ -89,8 +127,7 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
   await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => undefined);
   await page.waitForTimeout(3_000);
 
-  const robot = page.getByText("I'm not a robot");
-  if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
+  if (!(await isLoginFormVisible(page))) return;
 
   // Resolve credentials: env vars first, otherwise Chrome autofill.
   let username = config.schoolUsername;
@@ -122,7 +159,7 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
       await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
       await waitForHumanCheck(page);
       await page.waitForTimeout(3_000);
-      if (!(await robot.isVisible({ timeout: 3_000 }).catch(() => false))) return;
+      if (!(await isLoginFormVisible(page))) return;
     }
   }
 }
@@ -168,11 +205,7 @@ async function performSignIn(page: Page, username: string, password: string): Pr
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(2_000);
-    const formGone = await page
-      .getByText("I'm not a robot")
-      .isVisible({ timeout: 1_000 })
-      .catch(() => false);
-    if (!formGone) return;
+    if (!(await isLoginFormVisible(page, 1_000))) return;
   }
 
   throw new NeedsHumanLoginError(

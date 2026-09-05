@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Download, Page } from "playwright";
+import type { APIResponse, Download, Page } from "playwright";
 import sharp from "sharp";
 import { config } from "./config.js";
 import { DownloadStore } from "./store.js";
@@ -11,7 +11,24 @@ import {
   filenameFromUrl,
   sanitizeFilename,
   sha256,
+  sleep,
 } from "./utils.js";
+
+/** Attachment fetches are retried this many times before giving up. */
+const FETCH_ATTEMPTS = 3;
+/** Backoff between attachment-fetch retries (indexed by attempt). */
+const FETCH_RETRY_DELAYS_MS = [1_000, 2_000];
+
+/**
+ * True when a failed attachment fetch is worth retrying: rate limits (429),
+ * server-side failures (5xx), or no HTTP response at all (timeouts, resets,
+ * closed connections). Other 4xx answers (not found, forbidden) are final —
+ * retrying them cannot help.
+ */
+export function isTransientDownloadFailure(status?: number): boolean {
+  if (status === undefined) return true;
+  return status === 429 || (status >= 500 && status < 600);
+}
 
 interface CandidateImage {
   url: string;
@@ -83,6 +100,38 @@ export class DownloadManager {
     return this.saveBuffer(body, suggestedName, sourceUrl, contentType, dateLabel);
   }
 
+  /**
+   * GET an attachment URL, retrying transient failures (429/5xx/network
+   * errors) with backoff. Permanent failures (other 4xx) and the final
+   * transient failure are returned, never thrown, so the caller records them
+   * as per-item failures. Only a transport-level failure on the last attempt
+   * throws.
+   */
+  private async getWithRetry(page: Page, url: string): Promise<APIResponse> {
+    let lastStatus: number | undefined;
+    for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await page.context().request.get(url, {
+          headers: { referer: page.url() },
+          failOnStatusCode: false,
+          timeout: 30_000,
+        });
+        if (response.ok() || !isTransientDownloadFailure(response.status()) || attempt === FETCH_ATTEMPTS) {
+          return response;
+        }
+        lastStatus = response.status();
+        console.warn(`  ! HTTP ${lastStatus} for image (attempt ${attempt}/${FETCH_ATTEMPTS}) — retrying...`);
+      } catch (error) {
+        if (attempt === FETCH_ATTEMPTS) throw error;
+        console.warn(
+          `  ! Image request failed (${(error as Error).message}, attempt ${attempt}/${FETCH_ATTEMPTS}) — retrying...`,
+        );
+      }
+      await sleep(FETCH_RETRY_DELAYS_MS[Math.min(attempt - 1, FETCH_RETRY_DELAYS_MS.length - 1)]);
+    }
+    throw new Error(lastStatus ? `HTTP ${lastStatus} for image` : "Image request failed");
+  }
+
   private async fetchAndSave(page: Page, candidate: CandidateImage, dateLabel?: string): Promise<SaveResult> {
     if (candidate.url.startsWith("data:image/")) {
       const match = candidate.url.match(/^data:([^;,]+)(?:;charset=[^;,]+)?;base64,(.+)$/);
@@ -104,11 +153,7 @@ export class DownloadManager {
       return this.saveBuffer(Buffer.from(encoded.base64, "base64"), candidate.alt, candidate.url, encoded.contentType);
     }
 
-    const response = await page.context().request.get(candidate.url, {
-      headers: { referer: page.url() },
-      failOnStatusCode: false,
-      timeout: 30_000,
-    });
+    const response = await this.getWithRetry(page, candidate.url);
     if (!response.ok()) {
       return { saved: false, duplicate: false, reason: `HTTP ${response.status()} for image` };
     }

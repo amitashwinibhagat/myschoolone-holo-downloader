@@ -30,6 +30,7 @@ if (mode === "summary") {
   console.log(`Last new photos       : ${data.lastNewPhotosAt ? new Date(data.lastNewPhotosAt).toLocaleString() : "never"}`);
   console.log(`Failure streak        : ${summary.consecutiveFailures}`);
   console.log(`Last transport        : ${summary.transport}`);
+  console.log(`Next action           : ${summary.action}`);
 
   console.log(`Photos this week      : ${summary.thisWeek}`);
   console.log(`Photos this month     : ${summary.thisMonth}`);

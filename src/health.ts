@@ -18,7 +18,7 @@ import { DownloadManager } from "./downloads.js";
 import { DownloadStore } from "./store.js";
 import { acquireRunLock } from "./run-lock.js";
 import { notify } from "./notify.js";
-import { ensureLoggedIn, NeedsHumanLoginError } from "./portal.js";
+import { appFrame, ensureLoggedIn, NeedsHumanLoginError } from "./portal.js";
 
 const FINGERPRINT_FILE = "portal-fingerprint.json";
 
@@ -61,7 +61,10 @@ async function captureFingerprint(page: Page): Promise<PortalFingerprint> {
   // Wait for Cloudflare if needed
   await waitForHumanCheck(page);
 
-  const fingerprint = await page.evaluate(() => {
+  // The portal app renders inside a sub-frame; fingerprinting the top-level
+  // frameset would hash an empty shell and flag phantom "changes". Read the
+  // same app frame the downloader itself drives.
+  const fingerprint = await appFrame(page).evaluate(() => {
     const selectors: Record<string, string> = {};
 
     // Check for key DOM elements

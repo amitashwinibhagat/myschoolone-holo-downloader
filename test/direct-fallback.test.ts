@@ -58,3 +58,10 @@ test("directNeedsFallback: individual download failures do not force a fallback 
     false,
   );
 });
+
+test("degradedLookbackFailure: message names the degraded coverage", async () => {
+  const { degradedLookbackFailure } = await import("../src/run-download.js");
+  const message = degradedLookbackFailure(7);
+  assert.ok(message.includes("today's view only"));
+  assert.ok(message.includes("7 day(s)"));
+});

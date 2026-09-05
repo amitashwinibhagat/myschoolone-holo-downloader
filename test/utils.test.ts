@@ -10,6 +10,7 @@ import {
   filenameFromUrl,
   filenameFromDisposition,
   mapWithConcurrency,
+  actionableHintFor,
 } from "../src/utils.js";
 
 test("sha256: produces consistent hex hash", () => {
@@ -133,4 +134,22 @@ test("mapWithConcurrency: a throwing task does not cancel its siblings when caug
   });
   assert.deepEqual(results, ["ok-1", "failed", "ok-3", "ok-4"]);
   assert.deepEqual(seen.sort(), [1, 3, 4]);
+});
+
+test("actionableHintFor: login-flavored errors point at npm run login", () => {
+  assert.ok(actionableHintFor(new Error("login fields not found"))?.includes("npm run login"));
+  assert.ok(actionableHintFor(new Error("Session expired"))?.includes("npm run login"));
+});
+
+test("actionableHintFor: translates cryptic browser and network failures", () => {
+  assert.ok(actionableHintFor(new Error("Target closed"))?.includes("rerun"));
+  assert.ok(actionableHintFor(new Error("frame.goto: Protocol error (Page.navigate): No frame with given id found"))?.includes("rerun"));
+  assert.ok(actionableHintFor(new Error("Timeout 30000ms exceeded"))?.includes("npm run health"));
+  assert.ok(actionableHintFor(new Error("net::ERR_NAME_NOT_RESOLVED"))?.includes("internet"));
+  assert.ok(actionableHintFor(new Error("Executable doesn't exist"))?.includes("install-browser"));
+});
+
+test("actionableHintFor: returns undefined for self-explanatory errors", () => {
+  assert.equal(actionableHintFor(new Error("portal exploded")), undefined);
+  assert.equal(actionableHintFor(undefined), undefined);
 });

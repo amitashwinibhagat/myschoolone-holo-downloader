@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const notifySummary = process.argv.includes("--notify-summary");
   logInfo(`Manual run starting (lookback=${lookbackDays} days).`);
 
-  const { record, result, skipped, lockOwner, error, consecutiveFailures } = await runJob({
+  const { record, result, skipped, lockOwner, error, consecutiveFailures, hint } = await runJob({
     source: "manual",
     mode: "manual",
     lookbackDays,
@@ -49,7 +49,8 @@ async function main(): Promise<void> {
   // Failure
   const message = error?.message || "Download failed without an error message.";
   logError(`Failed: ${message}`);
-  await notifyRunFailure(message, record.outcome === "needs_login" ? "needs_login" : "failure", consecutiveFailures ?? 0);
+  if (hint) logError(hint);
+  await notifyRunFailure(message, record.outcome === "needs_login" ? "needs_login" : "failure", consecutiveFailures ?? 0, hint);
   throw error || new Error(message);
 }
 

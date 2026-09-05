@@ -27,7 +27,13 @@ async function saveCredentialsFromBrowser(page: import("playwright").Page): Prom
 
   const username = await page.locator("#user_names").inputValue().catch(() => "");
   const password = await page.locator("#password").inputValue().catch(() => "");
-  if (!username || !password) return;
+  if (!username || !password) {
+    // The portal usually lands on the dashboard after login, where the form
+    // fields no longer exist — say so instead of silently skipping, or the
+    // user assumes auto-login was configured when it was not.
+    console.warn("Could not read credentials from the login form (already past it?) — skipping .env auto-save.");
+    return;
+  }
 
   const lines = [
     "",

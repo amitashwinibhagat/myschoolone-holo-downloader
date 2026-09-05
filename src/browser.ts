@@ -7,6 +7,18 @@ export interface BrowserSession {
   getPage: () => Page;
 }
 
+/**
+ * Pick the page to drive: the active one while it is open, otherwise the
+ * first still-open page (e.g. the main page after a popup closed). Only when
+ * every page is closed is the dead active page returned, so the caller fails
+ * with Playwright's own clear error instead of acting on the wrong target.
+ * Pure (takes plain page handles) so it can be unit-tested without a browser.
+ */
+export function resolveActivePage(pages: Page[], active: Page): Page {
+  if (!active.isClosed()) return active;
+  return pages.find((page) => !page.isClosed()) ?? active;
+}
+
 // Fallback UA only used when the real Google Chrome channel is unavailable.
 // Kept intentionally close to the bundled Chromium major version so the UA
 // string stays consistent with the browser's actual JS engine / client hints.
@@ -109,7 +121,7 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
   for (const page of context.pages()) register(page);
   context.on("page", register);
 
-  return { context, getPage: () => activePage };
+  return { context, getPage: () => resolveActivePage(context.pages(), activePage) };
 }
 
 /**

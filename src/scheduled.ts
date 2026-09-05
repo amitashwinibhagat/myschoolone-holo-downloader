@@ -41,7 +41,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { record, result, skipped, lockOwner, error, consecutiveFailures } = await runJob({
+  const { record, result, skipped, lockOwner, error, consecutiveFailures, hint } = await runJob({
     source: "scheduled",
     mode: effectiveMode,
     lookbackDays,
@@ -86,7 +86,8 @@ async function main(): Promise<void> {
   // Failure
   const message = error?.message || "Download failed without an error message.";
   logError(`Failed: ${message}`);
-  await notifyRunFailure(message, record.outcome === "needs_login" ? "needs_login" : "failure", consecutiveFailures ?? 0);
+  if (hint) logError(hint);
+  await notifyRunFailure(message, record.outcome === "needs_login" ? "needs_login" : "failure", consecutiveFailures ?? 0, hint);
   await pingHealthcheck("fail");
   throw error || new Error(message);
 }

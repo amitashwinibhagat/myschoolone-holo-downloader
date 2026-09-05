@@ -172,7 +172,7 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
     const page = browser.getPage();
     await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await ensureLoggedIn(page);
-    const frame = await openDailyLogFrame(page);
+    await openDailyLogFrame(page);
     const flushDiscovery = observeDailyLogRequests(page);
 
     try {
@@ -180,8 +180,11 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
         const { iso, portal } = istDate(daysAgo);
         if (!(await selectDate(page, appFrame(page), portal))) {
           console.log("Date picker not available — harvesting the default view only.");
-          await downloadAll(page, downloads, await collectAttachmentUrls(frame), dateInIndia(), totals);
+          // Re-resolve the frame fresh: the handle captured before the date
+          // loop may have detached after navigation.
+          await downloadAll(page, downloads, await collectAttachmentUrls(appFrame(page)), dateInIndia(), totals);
           totals.daysChecked += 1;
+          totals.failures.push(degradedLookbackFailure(lookbackDays));
           break;
         }
         const urls = await collectAttachmentUrls(appFrame(page));
@@ -199,6 +202,16 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
   } finally {
     await browser.context.close().catch(() => undefined);
   }
+}
+
+/**
+ * Message recorded when the date picker cannot be driven, so the run only
+ * checked today's default view. Without it a 7-day lookback that degraded to
+ * 1 day still reports a clean success — the failure entry makes `status` and
+ * notifications honest about the partial coverage.
+ */
+export function degradedLookbackFailure(lookbackDays: number): string {
+  return `Date picker unavailable — checked today's view only instead of the last ${lookbackDays} day(s).`;
 }
 
 /**

@@ -120,3 +120,35 @@ test("runJob: records needs_login for NeedsHumanLoginError", async () => {
     await fs.rm(stateDir, { recursive: true, force: true });
   }
 });
+
+test("runJob: attaches a hint for cryptic failures, but not for needs_login", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-runjob-"));
+  try {
+    const cryptic = await runJob({
+      source: "manual",
+      mode: "manual",
+      lookbackDays: 1,
+      stateDir,
+      runDownloadImpl: async () => {
+        throw new Error("Target closed");
+      },
+    });
+    assert.equal(cryptic.ok, false);
+    assert.ok(cryptic.hint?.includes("rerun"));
+    // The stored record keeps the raw message untouched.
+    assert.equal(cryptic.record.error, "Target closed");
+
+    const login = await runJob({
+      source: "manual",
+      mode: "manual",
+      lookbackDays: 1,
+      stateDir,
+      runDownloadImpl: async () => {
+        throw new NeedsHumanLoginError("Login form showing");
+      },
+    });
+    assert.equal(login.hint, undefined);
+  } finally {
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
+});

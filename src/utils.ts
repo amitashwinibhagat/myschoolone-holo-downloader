@@ -127,6 +127,37 @@ export function filenameFromUrl(rawUrl: string): string {
   }
 }
 
+/**
+ * Map a cryptic run failure to a one-line next step for the user.
+ * Returns undefined when the error is already self-explanatory, so callers
+ * only append a hint when it adds signal. Pure — safe to unit-test.
+ */
+export function actionableHintFor(error: unknown): string | undefined {
+  const message = (error as Error)?.message || "";
+  if (/log ?in|sign ?in|session expired|not authenticated/i.test(message)) {
+    return "Next step: run `npm run login` to restore the portal session.";
+  }
+  if (/executable doesn't exist|browser executable/i.test(message)) {
+    return "Next step: run `npm run install-browser`, then rerun.";
+  }
+  if (/target closed|has been closed|failed to launch/i.test(message)) {
+    return "Next step: the browser closed mid-run — just rerun and leave the browser window alone.";
+  }
+  if (/no frame with given id|frame has been detached/i.test(message)) {
+    return "Next step: transient portal hiccup — just rerun.";
+  }
+  if (/verifying you are human|just a moment|checking your browser|cloudflare/i.test(message)) {
+    return "Next step: stuck on the portal human-check — rerun with HEADLESS=false and solve it once.";
+  }
+  if (/err_name_not_resolved|enotfound|econnrefused|enetunreach|network.*unreachable|no internet/i.test(message)) {
+    return "Next step: check your internet connection and rerun.";
+  }
+  if (/timeout|timed out/i.test(message)) {
+    return "Next step: the portal is responding slowly — rerun; if it persists, run `npm run health`.";
+  }
+  return undefined;
+}
+
 export function filenameFromDisposition(disposition: string | undefined): string | undefined {
   if (!disposition) return undefined;
   const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];

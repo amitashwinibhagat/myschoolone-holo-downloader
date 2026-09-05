@@ -327,3 +327,28 @@ test("DownloadStore: writes schemaVersion on save and tolerates legacy files", a
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("DownloadStore: corrupt JSON is quarantined and load starts fresh", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
+  try {
+    await fs.writeFile(path.join(dir, "downloads.json"), "{ half-written json...");
+    const store = new DownloadStore(dir);
+    await store.load();
+    assert.deepEqual(store.snapshot().records, []);
+    // The corrupt file was preserved under a new name, not deleted.
+    const entries = await fs.readdir(dir);
+    assert.ok(entries.some((name) => name.startsWith("downloads.json.corrupt-")), entries.join(","));
+    assert.ok(!entries.includes("downloads.json"));
+    // The store is usable again after recovery.
+    store.add({
+      hash: "after-recovery",
+      filename: "photo.jpg",
+      savedPath: "/tmp/photo.jpg",
+      downloadedAt: new Date().toISOString(),
+    });
+    await store.flush();
+    assert.equal(store.snapshot().records.length, 1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
