@@ -13,10 +13,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "playwright";
 import { config } from "./config.js";
-import { launchBrowser, waitForHumanCheck } from "./browser.js";
-import { DownloadManager } from "./downloads.js";
-import { DownloadStore } from "./store.js";
-import { acquireRunLock } from "./run-lock.js";
+import { waitForHumanCheck, withBrowserSession } from "./browser.js";
 import { notify } from "./notify.js";
 import { appFrame, ensureLoggedIn, NeedsHumanLoginError } from "./portal.js";
 
@@ -218,95 +215,95 @@ export function decideBaseline(
  *   baseline.
  */
 export async function runHealthCheck(): Promise<HealthCheckResult> {
-  const store = new DownloadStore(config.stateDir);
-  await store.load();
-  const downloads = new DownloadManager(store);
-  const lock = await acquireRunLock(config.stateDir, "manual", "manual");
-  if (!lock.acquired) {
-    return { healthy: false, changed: false, skipped: true, message: "Cannot run health check — browser is locked by another process." };
-  }
-
   try {
-    const browser = await launchBrowser(downloads);
-    try {
-      const page = browser.getPage();
-      // Ensure a logged-in session before fingerprinting: an expired session
-      // would otherwise fingerprint the login page, and the two-consecutive
-      // baseline rule could eventually accept it as the new baseline.
-      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await ensureLoggedIn(page);
-      const current = await captureFingerprint(page);
-      const baseline = await loadBaseline();
-      const changes = baseline ? diffFingerprints(baseline, current) : [];
-      const decision = decideBaseline(baseline, current, changes);
+    return await withBrowserSession<HealthCheckResult>(
+      "manual",
+      "manual",
+      async ({ page }) => {
+        // Ensure a logged-in session before fingerprinting: an expired session
+        // would otherwise fingerprint the login page, and the two-consecutive
+        // baseline rule could eventually accept it as the new baseline.
+        await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await ensureLoggedIn(page);
+        const current = await captureFingerprint(page);
+        const baseline = await loadBaseline();
+        const changes = baseline ? diffFingerprints(baseline, current) : [];
+        const decision = decideBaseline(baseline, current, changes);
 
-      switch (decision.action) {
-        case "first_capture":
-          await saveBaseline(current);
-          return {
-            healthy: true,
-            changed: false,
-            message: `First run — baseline captured (hash: ${current.hash}). Future runs will compare against this.`,
-            fingerprint: current,
-          };
-        case "unchanged":
-          return {
-            healthy: true,
-            changed: false,
-            message: `Portal structure unchanged (hash: ${current.hash}).`,
-            fingerprint: current,
-          };
-        case "recovered": {
-          const recovered: PortalFingerprint = { ...baseline! };
-          delete recovered.pendingChange;
-          await saveBaseline(recovered);
-          return {
-            healthy: true,
-            changed: false,
-            message: `Portal returned to the known baseline (hash: ${current.hash}) — pending change discarded.`,
-            fingerprint: current,
-          };
+        switch (decision.action) {
+          case "first_capture":
+            await saveBaseline(current);
+            return {
+              healthy: true,
+              changed: false,
+              message: `First run — baseline captured (hash: ${current.hash}). Future runs will compare against this.`,
+              fingerprint: current,
+            };
+          case "unchanged":
+            return {
+              healthy: true,
+              changed: false,
+              message: `Portal structure unchanged (hash: ${current.hash}).`,
+              fingerprint: current,
+            };
+          case "recovered": {
+            const recovered: PortalFingerprint = { ...baseline! };
+            delete recovered.pendingChange;
+            await saveBaseline(recovered);
+            return {
+              healthy: true,
+              changed: false,
+              message: `Portal returned to the known baseline (hash: ${current.hash}) — pending change discarded.`,
+              fingerprint: current,
+            };
+          }
+          case "accepted_change": {
+            const accepted: PortalFingerprint = { ...current };
+            delete accepted.pendingChange;
+            await saveBaseline(accepted);
+            await notify(
+              "School photos — PORTAL CHANGED (confirmed)",
+              `The portal structure change was confirmed on a second run. The downloader now uses the new baseline. If downloads fail, run \`npm run login\`.\n${decision.changes.slice(0, 5).join("\n")}`,
+            );
+            return {
+              healthy: false,
+              changed: true,
+              message:
+                `Portal structure changed and confirmed twice:\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
+                `New baseline hash: ${current.hash}`,
+              fingerprint: current,
+            };
+          }
+          case "pending_change": {
+            const pending: PortalFingerprint = {
+              ...baseline!,
+              pendingChange: { hash: current.hash, detectedAt: new Date().toISOString(), changes: decision.changes },
+            };
+            await saveBaseline(pending);
+            await notify(
+              "School photos — PORTAL CHANGED",
+              `The portal structure changed. If downloads start failing, run \`npm run login\` and check \`npm run health\`.\n${decision.changes.slice(0, 5).join("\n")}`,
+            );
+            return {
+              healthy: false,
+              changed: true,
+              message:
+                `Portal structure changed (first sighting — baseline kept):\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
+                `Re-run health check to confirm and accept the new baseline.`,
+              fingerprint: current,
+            };
+          }
         }
-        case "accepted_change": {
-          const accepted: PortalFingerprint = { ...current };
-          delete accepted.pendingChange;
-          await saveBaseline(accepted);
-          await notify(
-            "School photos — PORTAL CHANGED (confirmed)",
-            `The portal structure change was confirmed on a second run. The downloader now uses the new baseline. If downloads fail, run \`npm run login\`.\n${decision.changes.slice(0, 5).join("\n")}`,
-          );
-          return {
-            healthy: false,
-            changed: true,
-            message:
-              `Portal structure changed and confirmed twice:\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
-              `New baseline hash: ${current.hash}`,
-            fingerprint: current,
-          };
-        }
-        case "pending_change": {
-          const pending: PortalFingerprint = {
-            ...baseline!,
-            pendingChange: { hash: current.hash, detectedAt: new Date().toISOString(), changes: decision.changes },
-          };
-          await saveBaseline(pending);
-          await notify(
-            "School photos — PORTAL CHANGED",
-            `The portal structure changed. If downloads start failing, run \`npm run login\` and check \`npm run health\`.\n${decision.changes.slice(0, 5).join("\n")}`,
-          );
-          return {
-            healthy: false,
-            changed: true,
-            message:
-              `Portal structure changed (first sighting — baseline kept):\n${decision.changes.map((c) => `  - ${c}`).join("\n")}\n` +
-              `Re-run health check to confirm and accept the new baseline.`,
-            fingerprint: current,
-          };
-        }
-      }
-    } finally {
-      await browser.context.close().catch(() => undefined);
-    }
+      },
+      {
+        onLocked: () => ({
+          healthy: false,
+          changed: false,
+          skipped: true,
+          message: "Cannot run health check — browser is locked by another process.",
+        }),
+      },
+    );
   } catch (error) {
     if (error instanceof NeedsHumanLoginError) {
       return {
@@ -320,7 +317,5 @@ export async function runHealthCheck(): Promise<HealthCheckResult> {
       changed: false,
       message: `Health check failed: ${(error as Error).message}`,
     };
-  } finally {
-    await lock.release();
   }
 }

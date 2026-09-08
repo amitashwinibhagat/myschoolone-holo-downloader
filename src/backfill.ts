@@ -6,13 +6,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Frame, Page } from "playwright";
-import { launchBrowser } from "./browser.js";
+import { withBrowserSession } from "./browser.js";
 import { config } from "./config.js";
-import { DownloadManager } from "./downloads.js";
-import { DownloadStore } from "./store.js";
-import { acquireRunLock } from "./run-lock.js";
 import { appFrame, ensureLoggedIn, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { notify } from "./notify.js";
+import { mapWithConcurrency } from "./utils.js";
 
 const PROGRESS_FILE = path.join(config.stateDir, "backfill-progress.json");
 
@@ -186,17 +184,9 @@ async function main(): Promise<void> {
     }
   }
 
-  const store = new DownloadStore(config.stateDir);
-  await store.load();
-  const downloads = new DownloadManager(store);
-  const lock = await acquireRunLock(config.stateDir, "manual", "manual");
-  if (!lock.acquired) throw new Error("Another downloader command is using the browser profile. Wait for it to finish.");
-
-  try {
-    const browser = await launchBrowser(downloads);
+  await withBrowserSession("manual", "manual", async ({ page, downloads }) => {
     const totals: Totals = { saved: 0, duplicates: 0, failures: [], monthsProcessed: 0 };
     try {
-      const page = browser.getPage();
       await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await ensureLoggedIn(page);
       const frame = await openPreviousYearLog(page);
@@ -211,8 +201,8 @@ async function main(): Promise<void> {
         const imageUrls = await collectImageUrls(currentFrame);
         console.log(`[${chunk.label}] Found ${imageUrls.length} image(s).`);
 
-        // Use the month label as the date folder (e.g. "2025-10").
-        for (const url of imageUrls) {
+        // Concurrent (capped) downloads with per-item error isolation.
+        await mapWithConcurrency(imageUrls, config.downloadConcurrency, async (url) => {
           try {
             const result = await downloads.saveFromUrl(page, url, "", chunk.label);
             if (result.saved) {
@@ -226,7 +216,7 @@ async function main(): Promise<void> {
           } catch (error) {
             totals.failures.push(`${chunk.label} ${url.slice(-50)}: ${(error as Error).message}`);
           }
-        }
+        });
 
         totals.monthsProcessed += 1;
         await saveProgress(chunk.label);
@@ -246,15 +236,11 @@ async function main(): Promise<void> {
       }
       await notify("EY1 Backfill", summary);
     } catch (error) {
-      await writeFailureDebug(browser.getPage(), "backfill-failure");
+      await writeFailureDebug(page, "backfill-failure");
       await notify("EY1 Backfill — INTERRUPTED", (error as Error).message.slice(0, 200));
       throw error;
-    } finally {
-      await browser.context.close().catch(() => undefined);
     }
-  } finally {
-    await lock.release();
-  }
+  });
 }
 
 main().catch((error) => {

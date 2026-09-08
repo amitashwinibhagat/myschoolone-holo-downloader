@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   sha256,
   dateInIndia,
+  isoToPortalDate,
+  daysAgoIso,
   indiaTime,
   sanitizeFilename,
   redactPasswordValues,
@@ -25,6 +27,17 @@ test("dateInIndia: returns ISO date in IST", () => {
   // 2026-07-29T00:30:00Z = 2026-07-29T06:00:00+05:30 (IST)
   const date = new Date("2026-07-29T00:30:00Z");
   assert.equal(dateInIndia(date), "2026-07-29");
+});
+
+test("isoToPortalDate: converts YYYY-MM-DD to DD/MM/YYYY", () => {
+  assert.equal(isoToPortalDate("2026-08-20"), "20/08/2026");
+  assert.equal(isoToPortalDate("2025-01-05"), "05/01/2025");
+});
+
+test("daysAgoIso: returns valid IST ISO date", () => {
+  const today = dateInIndia();
+  assert.equal(daysAgoIso(0), today);
+  assert.match(daysAgoIso(3), /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test("indiaTime: returns correct calendar parts", () => {

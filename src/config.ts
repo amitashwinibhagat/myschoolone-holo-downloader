@@ -78,6 +78,9 @@ export const config = {
   // Telegram notifications (optional — falls back to macOS osascript).
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || "",
+  // Send newly downloaded photos directly to the Telegram chat as an album preview.
+  telegramSendPhotos: (process.env.TELEGRAM_SEND_PHOTOS?.trim() ?? "true").toLowerCase() !== "false",
+  telegramMaxPhotosPerRun: boundedInteger("TELEGRAM_MAX_PHOTOS_PER_RUN", 10, 1, 30),
   healthcheckUrl: process.env.HEALTHCHECK_URL?.trim() || "",
   // Optional portal credentials for fully automatic re-login when the session
   // expires. When set, the deterministic path can sign back in without

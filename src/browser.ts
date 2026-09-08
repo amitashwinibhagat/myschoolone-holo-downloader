@@ -1,6 +1,8 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
+import { acquireRunLock } from "./run-lock.js";
+import { DownloadStore, type RunMode, type RunSource } from "./store.js";
 
 export interface BrowserSession {
   context: BrowserContext;
@@ -146,3 +148,49 @@ export async function waitForHumanCheck(page: Page, timeoutMs = 45_000): Promise
     await page.waitForTimeout(2_500);
   }
 }
+
+export interface BrowserSessionContext {
+  page: Page;
+  browser: BrowserSession;
+  downloads: DownloadManager;
+  store: DownloadStore;
+}
+
+export interface WithBrowserOptions<T> {
+  onLocked?: (owner?: { pid: number; startedAt: string; mode: RunMode; source: RunSource }) => Promise<T> | T;
+}
+
+/**
+ * Execute an async operation with an exclusive browser session and run lock.
+ * Automatically manages store loading, lock acquisition, browser launching,
+ * context closing, and lock releasing.
+ */
+export async function withBrowserSession<T>(
+  mode: RunMode,
+  source: RunSource,
+  fn: (session: BrowserSessionContext) => Promise<T>,
+  options?: WithBrowserOptions<T>,
+): Promise<T> {
+  const store = new DownloadStore(config.stateDir);
+  await store.load();
+  const downloads = new DownloadManager(store);
+  const lock = await acquireRunLock(config.stateDir, mode, source);
+  if (!lock.acquired) {
+    if (options?.onLocked) {
+      return await options.onLocked(lock.owner);
+    }
+    throw new Error("Another downloader command is using the browser profile. Wait for it to finish.");
+  }
+
+  try {
+    const browser = await launchBrowser(downloads);
+    try {
+      return await fn({ page: browser.getPage(), browser, downloads, store });
+    } finally {
+      await browser.context.close().catch(() => undefined);
+    }
+  } finally {
+    await lock.release();
+  }
+}
+

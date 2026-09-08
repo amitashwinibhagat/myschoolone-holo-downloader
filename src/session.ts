@@ -6,7 +6,7 @@
  * about expiring cookies, and avoid blind retries when a human must re-login.
  */
 import { config } from "./config.js";
-import { loadCookies, sessionExpiresWithin, fetchSameOrigin, DEFAULT_USER_AGENT } from "./direct-api.js";
+import { loadCookies, sessionExpiresWithin, fetchSameOrigin, DEFAULT_USER_AGENT } from "./http-client.js";
 
 export type SessionStatus = "ok" | "expired" | "challenge" | "unreachable";
 

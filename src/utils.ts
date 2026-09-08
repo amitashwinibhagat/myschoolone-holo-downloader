@@ -47,6 +47,17 @@ export function dateInIndia(date = new Date()): string {
   return `${map.year}-${map.month}-${map.day}`;
 }
 
+/** Convert ISO date (YYYY-MM-DD) to portal date format (DD/MM/YYYY). */
+export function isoToPortalDate(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-");
+  return `${day}/${month}/${year}`;
+}
+
+/** Return an ISO date string (YYYY-MM-DD) for `daysAgo` days prior in IST. */
+export function daysAgoIso(daysAgo: number): string {
+  return dateInIndia(new Date(Date.now() - daysAgo * 86_400_000));
+}
+
 export interface IndiaTime {
   weekday: number;
   hour: number;

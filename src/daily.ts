@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { notify, notifyRunFailure } from "./notify.js";
+import { notify, notifyRunFailure, sendTelegramPhotos } from "./notify.js";
 import { runJob } from "./run-job.js";
 import { logInfo, logWarn, logError, pruneDebugDirs } from "./log.js";
 
@@ -38,6 +38,11 @@ async function main(): Promise<void> {
     const summary = `${result.saved} new, ${result.duplicates} duplicates, ${result.failures.length} failed (${result.daysChecked} day view(s) checked via ${result.transport}).`;
     logInfo(`Done: ${summary}`);
     for (const failure of result.failures) logWarn(`  ! ${failure}`);
+
+    if (result.savedPaths.length > 0) {
+      await sendTelegramPhotos(result.savedPaths, `📸 ${result.saved} new photo(s) saved.`);
+    }
+
     if (notifySummary) {
       await notify("School photos — run complete", summary);
     } else if (result.saved > 0) {

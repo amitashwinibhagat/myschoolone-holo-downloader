@@ -13,6 +13,7 @@ const TELEGRAM_API = "https://api.telegram.org/bot";
 const OFFSET_FILE = () => path.join(config.stateDir, "telegram-offset.json");
 /** Absolute path to src/daily.ts, independent of the process working directory. */
 const DAILY_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "daily.ts");
+const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 interface TelegramUpdate {
   update_id: number;
@@ -98,7 +99,7 @@ function spawnRun(chatId: number): void {
   const args = ["--import", "tsx", DAILY_SCRIPT, "--lookback-days", String(config.lookbackDays), "--notify-summary"];
   logInfo(`Spawning run: ${process.execPath} ${args.join(" ")}`);
   const child = spawn(process.execPath, args, {
-    cwd: process.cwd(),
+    cwd: PROJECT_DIR,
     stdio: ["ignore", "inherit", "inherit"],
     env: process.env,
   });

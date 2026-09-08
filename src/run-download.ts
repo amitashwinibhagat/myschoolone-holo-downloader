@@ -13,7 +13,7 @@ import {
 } from "./direct-api.js";
 import { appFrame, ensureLoggedIn, NeedsHumanLoginError, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { checkSession } from "./session.js";
-import { dateInIndia, mapWithConcurrency, sleep } from "./utils.js";
+import { dateInIndia, daysAgoIso, isoToPortalDate, mapWithConcurrency, sleep } from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
 const MAX_ATTEMPTS = 2;
@@ -24,6 +24,7 @@ export interface RunTotals {
   duplicates: number;
   failures: string[];
   daysChecked: number;
+  savedPaths: string[];
 }
 
 export interface RunDownloadResult extends RunTotals {
@@ -32,9 +33,8 @@ export interface RunDownloadResult extends RunTotals {
 
 /** IST calendar date `daysAgo` days back, as folder label and portal format. */
 function istDate(daysAgo: number): { iso: string; portal: string } {
-  const iso = dateInIndia(new Date(Date.now() - daysAgo * 86_400_000));
-  const [year, month, day] = iso.split("-");
-  return { iso, portal: `${day}/${month}/${year}` };
+  const iso = daysAgoIso(daysAgo);
+  return { iso, portal: isoToPortalDate(iso) };
 }
 
 async function selectDate(page: Page, frame: Frame, portalDate: string): Promise<boolean> {
@@ -85,6 +85,7 @@ async function downloadAll(
       const result = await downloads.saveFromUrl(page, url, "", dateLabel);
       if (result.saved) {
         totals.saved += 1;
+        if (result.path) totals.savedPaths.push(result.path);
         console.log(`  ✓ Saved ${result.path}`);
       } else if (result.duplicate) {
         totals.duplicates += 1;
@@ -107,7 +108,7 @@ async function directAttempt(
   lookbackDays: number,
 ): Promise<{ totals: RunTotals; outcome: DirectPollOutcome; fetchErrors: number }> {
   const downloads = new DownloadManager(store);
-  const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0 };
+  const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0, savedPaths: [] };
 
   const outcome = await directPollAttachments(lookbackDays);
   let fetchErrors = 0;
@@ -148,6 +149,7 @@ async function directAttempt(
 
         if (result.saved) {
           totals.saved += 1;
+          if (result.path) totals.savedPaths.push(result.path);
           console.log(`  ✓ Saved ${result.path}`);
         } else if (result.duplicate) {
           totals.duplicates += 1;
@@ -166,7 +168,7 @@ async function directAttempt(
 async function browserAttempt(store: DownloadStore, lookbackDays: number): Promise<RunTotals> {
   const downloads = new DownloadManager(store);
   const browser = await launchBrowser(downloads);
-  const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0 };
+  const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0, savedPaths: [] };
 
   try {
     const page = browser.getPage();
