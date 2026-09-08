@@ -53,6 +53,7 @@ test("runJob: records a successful run with an injected downloader", async () =>
         duplicates: 1,
         failures: [],
         daysChecked: 7,
+        savedPaths: [],
         transport: "direct",
       }),
     });

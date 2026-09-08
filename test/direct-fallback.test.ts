@@ -20,7 +20,7 @@ function outcome(overrides: Partial<DirectPollOutcome> = {}): DirectPollOutcome 
 }
 
 function totals(overrides: Partial<RunTotals> = {}): RunTotals {
-  return { saved: 0, duplicates: 0, failures: [], daysChecked: 0, ...overrides };
+  return { saved: 0, duplicates: 0, failures: [], daysChecked: 0, savedPaths: [], ...overrides };
 }
 
 test("directNeedsFallback: any fetch-level error triggers a browser fallback", () => {
