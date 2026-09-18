@@ -37,6 +37,16 @@ const LAUNCH_ARGS = [
   "--disable-dev-shm-usage",
 ];
 
+/**
+ * Linux headless (cloud runners) has no usable GPU, and a GPU-less renderer
+ * can die mid-navigation, surfacing as "Target ... has been closed". Disable
+ * the GPU path there. macOS keeps its natural GPU pipeline (and fingerprint)
+ * untouched, so only the cloud path changes behaviour.
+ */
+function platformArgs(): string[] {
+  return process.platform === "linux" && config.headless ? ["--disable-gpu"] : [];
+}
+
 function buildOptions(channel?: string) {
   const options: Parameters<typeof chromium.launchPersistentContext>[1] = {
     headless: config.headless,
@@ -47,7 +57,7 @@ function buildOptions(channel?: string) {
     timezoneId: "Asia/Kolkata",
     // Prevent Playwright from advertising itself as automated.
     ignoreDefaultArgs: ["--enable-automation"],
-    args: LAUNCH_ARGS,
+    args: [...LAUNCH_ARGS, ...platformArgs()],
   };
 
   if (channel) {
@@ -98,6 +108,18 @@ async function launchContext(): Promise<BrowserContext> {
 
 export async function launchBrowser(downloadManager: DownloadManager): Promise<BrowserSession> {
   const context = await launchContext();
+  const launchedAt = Date.now();
+  const elapsed = (): string => `${Math.round((Date.now() - launchedAt) / 1000)}s`;
+
+  // Crash telemetry: on cloud runners (fresh profile, headless, datacenter IP)
+  // a mid-run "Target ... has been closed" needs a cause — a portal script
+  // closing its tab, a renderer crash, or the whole process dying. These
+  // timestamps line the page/context lifecycle up against the run log. The
+  // context-close line also fires on normal shutdown, where its elapsed time
+  // just matches the run duration.
+  context.on("close", () => {
+    console.warn(`Browser context closed after ${elapsed()}.`);
+  });
 
   // Minimal, consistent masking only. With a REAL browser (Chrome/Edge) plus the
   // --disable-blink-features=AutomationControlled flag, the fingerprint is already
@@ -118,6 +140,12 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
     activePage = page;
     page.on("download", (download) => void downloadManager.captureNativeDownload(download));
     page.on("popup", (popup) => register(popup));
+    page.on("crash", () => {
+      console.warn(`Page crashed after ${elapsed()} (renderer died — see run diagnostics for OOM/sandbox causes).`);
+    });
+    page.on("close", () => {
+      console.warn(`Page closed after ${elapsed()} (portal scripts can close stale tabs).`);
+    });
   };
 
   for (const page of context.pages()) register(page);

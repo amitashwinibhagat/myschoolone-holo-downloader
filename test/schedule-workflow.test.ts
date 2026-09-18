@@ -46,6 +46,6 @@ test("scheduled workflow: cron covers weekdays only (Mon-Fri)", () => {
 
 test("scheduled workflow: runs the IST-window entry and never cancels an in-flight run", () => {
   const yaml = readFileSync(WORKFLOW_PATH, "utf8");
-  assert.match(yaml, /run:\s*npm run scheduled/m, "must invoke the scheduled entry, not a raw download");
+  assert.match(yaml, /^\s+npm run scheduled\b/m, "must invoke the scheduled entry, not a raw download");
   assert.match(yaml, /cancel-in-progress:\s*false/m, "runs must queue, never cancel mid-download");
 });

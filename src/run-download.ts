@@ -1,5 +1,5 @@
 import type { Frame, Page } from "playwright";
-import { launchBrowser } from "./browser.js";
+import { launchBrowser, type BrowserSession } from "./browser.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { DownloadStore, type RunTransport } from "./store.js";
@@ -13,11 +13,40 @@ import {
 } from "./direct-api.js";
 import { appFrame, ensureLoggedIn, NeedsHumanLoginError, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { checkSession } from "./session.js";
-import { dateInIndia, daysAgoIso, isoToPortalDate, mapWithConcurrency, sleep } from "./utils.js";
+import { dateInIndia, daysAgoIso, isoToPortalDate, mapWithConcurrency, sleep, withTimeout } from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 60_000;
+
+/**
+ * Playwright surfaces a dead browser target in several shapes depending on
+ * what died (tab, context, or whole browser process). All of them mean the
+ * flow's page handle is stale, not that the work failed.
+ */
+export function isClosedTargetError(error: unknown): boolean {
+  return /Target page, context or browser has been closed|Target closed|Browser has been closed|Session closed/.test(
+    (error as Error)?.message ?? "",
+  );
+}
+
+/**
+ * Run a page operation, re-resolving the live page once if the target it was
+ * using gets closed mid-operation (a portal script closing its tab, or the
+ * active page dying). `resolveActivePage` picks a still-open page when one
+ * exists, so this recovers single-page closes; when the whole context died
+ * the retried operation fails again with the same clear error.
+ */
+export async function withLivePage<T>(browser: BrowserSession, op: (page: Page) => Promise<T>): Promise<T> {
+  try {
+    return await op(browser.getPage());
+  } catch (error) {
+    if (!isClosedTargetError(error)) throw error;
+    console.warn(`Active page closed mid-run — re-resolving the live page once (${(error as Error).message.split("\n")[0]}).`);
+    await sleep(1_000);
+    return await op(browser.getPage());
+  }
+}
 
 export interface RunTotals {
   saved: number;
@@ -47,16 +76,18 @@ async function selectDate(page: Page, frame: Frame, portalDate: string): Promise
     )
     .catch(() => undefined);
 
-  const changed = await frame
-    .evaluate((value) => {
+  const changed = await withTimeout(
+    frame.evaluate((value) => {
       const input = document.querySelector<HTMLInputElement>("#dailydate");
       const loader = (window as { displaysubjects?: (value: string) => void }).displaysubjects;
       if (!input || typeof loader !== "function") return false;
       input.value = value;
       loader(value);
       return true;
-    }, portalDate)
-    .catch(() => false);
+    }, portalDate),
+    15_000,
+    "Setting the daily-log date",
+  ).catch(() => false);
   if (!changed) return false;
 
   await ajaxSettled;
@@ -65,8 +96,12 @@ async function selectDate(page: Page, frame: Frame, portalDate: string): Promise
 }
 
 async function collectAttachmentUrls(frame: Frame): Promise<string[]> {
-  const urls = await frame.evaluate(() =>
-    Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"), (anchor) => anchor.href),
+  const urls = await withTimeout(
+    frame.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"), (anchor) => anchor.href),
+    ),
+    15_000,
+    "Collecting attachment links",
   );
   return [...new Set(urls.filter((url) => ATTACHMENT_PATTERN.test(url)))];
 }
@@ -171,10 +206,12 @@ async function browserAttempt(store: DownloadStore, lookbackDays: number): Promi
   const totals: RunTotals = { saved: 0, duplicates: 0, failures: [], daysChecked: 0, savedPaths: [] };
 
   try {
+    await withLivePage(browser, (p) => p.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }));
+    await withLivePage(browser, (p) => ensureLoggedIn(p));
+    await withLivePage(browser, (p) => openDailyLogFrame(p));
+    // Fresh handle for the harvesting loop below (setup may have recovered
+    // onto a different live page via withLivePage).
     const page = browser.getPage();
-    await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await ensureLoggedIn(page);
-    await openDailyLogFrame(page);
     const flushDiscovery = observeDailyLogRequests(page);
 
     try {
@@ -221,18 +258,20 @@ export function degradedLookbackFailure(lookbackDays: number): string {
  * fallback. We distrust the direct result when:
  * - any fetch-level error occurred (session/endpoint problem the browser can
  *   recover from — and it refreshes the discovery file), or
+ * - the captured discovery that drove the replay is stale or incomplete (a
+ *   stale `type` value could silently hide real photos), or
  * - nothing was found across the ENTIRE lookback window. A stale captured
  *   `type` value could otherwise silently hide real photos until the discovery
  *   file expires, so an all-empty window is always verified once with the
- *   browser. (When at least one day yielded attachments, the direct result is
- *   trusted even if some days were empty.)
+ *   browser.
  *
- * `outcome` (discovery freshness/completeness) is kept in the signature for
- * diagnostics; the trust decision currently collapses to "verify all-empty
- * windows regardless of discovery metadata".
+ * The discovery checks only ever ADD a fallback — they never make a direct
+ * result more trusted — so a weak capture is verified once with the browser
+ * even when it happened to return some attachments.
  */
 export function directNeedsFallback(totals: RunTotals, outcome: DirectPollOutcome, fetchErrors: number): boolean {
   if (fetchErrors > 0) return true;
+  if (outcome.discoveryUsed && (!outcome.discoveryComplete || !outcome.discoveryFresh)) return true;
   const anyUrlsFound = totals.saved > 0 || totals.duplicates > 0;
   if (anyUrlsFound) return false;
   return true; // whole window empty → verify once with the browser
@@ -256,7 +295,7 @@ export async function runDownload(store: DownloadStore, lookbackDays: number): P
     }
   }
 
-  // Try direct-poll first — faster, no browser needed, no AI cost. Disabled by
+  // Try direct-poll first — faster and needs no browser. Disabled by
   // DIRECT_POLL=false when the portal's AJAX endpoints reject raw requests.
   const directWorthTrying =
     config.directPoll &&
@@ -284,6 +323,12 @@ export async function runDownload(store: DownloadStore, lookbackDays: number): P
     } catch (error) {
       lastError = error as Error;
       console.error(`Attempt ${attemptNumber}/${MAX_ATTEMPTS} failed: ${lastError.message}`);
+      if (isClosedTargetError(lastError)) {
+        console.error(
+          "Browser died mid-run. On Linux check for OOM kills (dmesg | grep -i 'killed process'), " +
+            "small /dev/shm, or a missing GPU — the launch log above shows exactly when it died.",
+        );
+      }
       if (lastError instanceof NeedsHumanLoginError) {
         // A human must re-login; retrying immediately would just waste time.
         console.error("Login required — not retrying automatically.");

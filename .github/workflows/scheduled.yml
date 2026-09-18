@@ -107,17 +107,33 @@ jobs:
             --exclude "run.lock/*" --exclude "debug/*" --exclude "*.corrupt-*"
 
       - name: Run downloader (scheduled.ts handles IST window + mode + pings)
-        run: npm run scheduled ${{ inputs.force && '-- --force' || '' }}
+        # stderr (Chrome process warnings, Playwright launch errors) stays
+        # visible in the log AND is captured for the diagnostics step below.
+        run: |
+          mkdir -p "$DOWNLOAD_DIR"
+          npm run scheduled ${{ inputs.force && '-- --force' || '' }} 2> >(tee /tmp/chrome-stderr.log >&2)
+
+      - name: Diagnose browser failure (memory, /dev/shm, process stderr)
+        if: failure()
+        run: |
+          echo "--- memory ---"; free -h || true
+          echo "--- /dev/shm ---"; df -h /dev/shm || true
+          echo "--- OOM kills visible to this runner ---"
+          sudo dmesg 2>/dev/null | grep -i "killed process" | tail -5 || echo "(none found)"
+          echo "--- captured browser/process stderr (tail) ---"
+          tail -50 /tmp/chrome-stderr.log 2>/dev/null || true
 
       - name: Sync new photos to R2 (also on failure — dedupe keeps this safe)
         if: always()
         run: |
+          mkdir -p "$DOWNLOAD_DIR"
           aws s3 sync "$DOWNLOAD_DIR" "s3://$R2_BUCKET/photos" \
             --endpoint-url "$R2_ENDPOINT"
 
       - name: Sync state back to R2 (also on failure)
         if: always()
         run: |
+          mkdir -p "$STATE_DIR"
           aws s3 sync "$STATE_DIR" "s3://$R2_BUCKET/state" \
             --endpoint-url "$R2_ENDPOINT" \
             --exclude "run.lock/*" --exclude "debug/*" --exclude "*.corrupt-*"
