@@ -6,12 +6,15 @@ import { config } from "./config.js";
 import { DownloadStore } from "./store.js";
 import {
   dateInIndia,
+  exceedsMaxSize,
   extensionForContentType,
   filenameFromDisposition,
   filenameFromUrl,
+  MAX_ATTACHMENT_BYTES,
   sanitizeFilename,
   sha256,
   sleep,
+  withTimeout,
 } from "./utils.js";
 
 /** Attachment fetches are retried this many times before giving up. */
@@ -140,16 +143,20 @@ export class DownloadManager {
     }
 
     if (candidate.url.startsWith("blob:")) {
-      const encoded = await page.evaluate(async (url) => {
-        const response = await fetch(url);
-        const contentType = response.headers.get("content-type") || "image/jpeg";
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        let binary = "";
-        for (let index = 0; index < bytes.length; index += 0x8000) {
-          binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-        }
-        return { base64: btoa(binary), contentType };
-      }, candidate.url);
+      const encoded = await withTimeout(
+        page.evaluate(async (url) => {
+          const response = await fetch(url);
+          const contentType = response.headers.get("content-type") || "image/jpeg";
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = "";
+          for (let index = 0; index < bytes.length; index += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+          }
+          return { base64: btoa(binary), contentType };
+        }, candidate.url),
+        20_000,
+        "Reading a blob attachment",
+      );
       return this.saveBuffer(Buffer.from(encoded.base64, "base64"), candidate.alt, candidate.url, encoded.contentType);
     }
 
@@ -160,6 +167,10 @@ export class DownloadManager {
 
     const headers = response.headers();
     const contentType = headers["content-type"] || "";
+    // Refuse an oversized body before buffering it into memory.
+    if (exceedsMaxSize(headers["content-length"])) {
+      return { saved: false, duplicate: false, reason: "Image exceeded the size limit" };
+    }
     const body = await response.body();
     const imageLike = contentType.startsWith("image/") || /\.(jpe?g|png|webp|gif|heic|heif|avif)(?:$|\?)/i.test(candidate.url);
     if (!imageLike) {
@@ -179,6 +190,10 @@ export class DownloadManager {
   ): Promise<SaveResult> {
     if (body.length < 8_000) {
       return { saved: false, duplicate: false, reason: "Image was smaller than 8 KB" };
+    }
+    // Covers chunked responses that arrive without a Content-Length header.
+    if (body.length > MAX_ATTACHMENT_BYTES) {
+      return { saved: false, duplicate: false, reason: "Image exceeded the size limit" };
     }
 
     const hash = sha256(body);
@@ -215,10 +230,16 @@ export class DownloadManager {
     const destination = path.join(folder, filename);
 
     // Write to a temp file first so a crash mid-write never leaves a partial
-    // image at the final path.
+    // image at the final path; clean the temp up if the rename fails so stale
+    // .tmp files do not accumulate in the download folder.
     const temp = `${destination}.tmp`;
-    await fs.writeFile(temp, output);
-    await fs.rename(temp, destination);
+    try {
+      await fs.writeFile(temp, output);
+      await fs.rename(temp, destination);
+    } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
 
     this.store.add({
       hash,

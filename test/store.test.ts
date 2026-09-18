@@ -328,6 +328,35 @@ test("DownloadStore: writes schemaVersion on save and tolerates legacy files", a
   }
 });
 
+test("DownloadStore: valid JSON with a non-array records field is quarantined, not crashed", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
+  try {
+    // Parses fine but has the wrong shape — used to throw a TypeError from
+    // `records.map` and take down every command.
+    await fs.writeFile(path.join(dir, "downloads.json"), JSON.stringify({ records: { nope: true } }));
+    const store = new DownloadStore(dir);
+    await assert.doesNotReject(() => store.load());
+    assert.deepEqual(store.snapshot().records, []);
+    assert.equal(store.hasHash("anything"), false);
+    const entries = await fs.readdir(dir);
+    assert.ok(entries.some((name) => name.startsWith("downloads.json.corrupt-")), entries.join(","));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("DownloadStore: valid JSON that is not an object is quarantined", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
+  try {
+    await fs.writeFile(path.join(dir, "downloads.json"), "[1, 2, 3]");
+    const store = new DownloadStore(dir);
+    await assert.doesNotReject(() => store.load());
+    assert.deepEqual(store.snapshot().records, []);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("DownloadStore: corrupt JSON is quarantined and load starts fresh", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myschoolone-store-"));
   try {

@@ -13,9 +13,19 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 LOG_DIR="${STATE_FROM_ENV:-$HOME/.local/share/myschoolone-downloader/state}"
 
-if [ ! -f "$TSX_CLI" ]; then
-  echo "tsx not found. Run: npm install" >&2
-  exit 1
+# Prefer the compiled build (dist/) so the bot does not depend on tsx at
+# runtime; fall back to tsx + src/ when the project has not been built yet.
+if [ -f "$PROJECT_DIR/dist/telegram-bot.js" ]; then
+  PROGRAM_ARGS="$(printf '    <string>%s</string>\n    <string>%s</string>' "$NODE_BIN" "$PROJECT_DIR/dist/telegram-bot.js")"
+  RUN_MODE="compiled (dist/telegram-bot.js)"
+else
+  if [ ! -f "$TSX_CLI" ]; then
+    echo "Neither dist/telegram-bot.js nor tsx was found." >&2
+    echo "Build it (npm run build) or install dependencies (npm install), then rerun." >&2
+    exit 1
+  fi
+  PROGRAM_ARGS="$(printf '    <string>%s</string>\n    <string>%s</string>\n    <string>src/telegram-bot.ts</string>' "$NODE_BIN" "$TSX_CLI")"
+  RUN_MODE="tsx (src/telegram-bot.ts) — run 'npm run build' for a tsx-free runtime"
 fi
 
 if [ ! -f "$PROJECT_DIR/.env" ]; then
@@ -33,15 +43,14 @@ cat > "$PLIST" <<PLIST
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${NODE_BIN}</string>
-    <string>${TSX_CLI}</string>
-    <string>src/telegram-bot.ts</string>
+${PROGRAM_ARGS}
   </array>
   <key>WorkingDirectory</key><string>${PROJECT_DIR}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>$(dirname "$NODE_BIN"):/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key><string>${HOME}</string>
+    <key>TZ</key><string>Asia/Kolkata</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -57,6 +66,7 @@ launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
 echo "Installed ${LABEL}: Telegram bot running in background."
+echo "Run mode: ${RUN_MODE}"
 echo "Logs: $LOG_DIR/telegram-bot.out.log and $LOG_DIR/telegram-bot.err.log"
 echo "To stop: launchctl bootout gui/$(id -u) $PLIST"
 echo "Remember to set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in $PROJECT_DIR/.env"

@@ -13,6 +13,9 @@ import {
   filenameFromDisposition,
   mapWithConcurrency,
   actionableHintFor,
+  withTimeout,
+  exceedsMaxSize,
+  MAX_ATTACHMENT_BYTES,
 } from "../src/utils.js";
 
 test("sha256: produces consistent hex hash", () => {
@@ -165,4 +168,32 @@ test("actionableHintFor: translates cryptic browser and network failures", () =>
 test("actionableHintFor: returns undefined for self-explanatory errors", () => {
   assert.equal(actionableHintFor(new Error("portal exploded")), undefined);
   assert.equal(actionableHintFor(undefined), undefined);
+});
+
+test("withTimeout: resolves when the promise settles in time", async () => {
+  assert.equal(await withTimeout(Promise.resolve(42), 1_000, "op"), 42);
+});
+
+test("withTimeout: rejects when the promise never settles", async () => {
+  await assert.rejects(
+    () => withTimeout(new Promise<void>(() => undefined), 10, "stuck op"),
+    /stuck op timed out after 10ms/,
+  );
+});
+
+test("withTimeout: propagates the underlying rejection", async () => {
+  await assert.rejects(() => withTimeout(Promise.reject(new Error("boom")), 1_000, "op"), /boom/);
+});
+
+test("exceedsMaxSize: true only when a declared length is over the cap", () => {
+  assert.equal(exceedsMaxSize(String(MAX_ATTACHMENT_BYTES + 1)), true);
+  assert.equal(exceedsMaxSize(String(MAX_ATTACHMENT_BYTES)), false);
+  assert.equal(exceedsMaxSize("1024"), false);
+});
+
+test("exceedsMaxSize: missing or non-numeric headers are not treated as oversized", () => {
+  assert.equal(exceedsMaxSize(null), false);
+  assert.equal(exceedsMaxSize(undefined), false);
+  assert.equal(exceedsMaxSize(""), false);
+  assert.equal(exceedsMaxSize("not-a-number"), false);
 });

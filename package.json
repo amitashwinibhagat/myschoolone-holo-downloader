@@ -15,6 +15,7 @@
     "health": "tsx src/health-cli.ts",
     "rescan": "tsx src/rescan.ts",
     "resend-photos": "tsx src/resend-photos.ts",
+    "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "install-browser": "playwright install chromium"

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Frame, Page } from "playwright";
 import { waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
-import { redactPasswordValues } from "./utils.js";
+import { redactPasswordValues, sleep, withTimeout } from "./utils.js";
 
 /**
  * Raised when the portal shows a login form but the browser cannot complete
@@ -63,16 +63,21 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
   } catch (error) {
     if (!isNavigationInterrupted(error)) throw error;
     console.warn("Frame navigation interrupted by the App.php wrapper — waiting for it to settle...");
-    await page.waitForTimeout(5_000);
-    await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
     await page.waitForTimeout(2_000);
+    await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
   }
-  await page.waitForTimeout(4_000);
 
-  let frame = appFrame(page);
-  if ((await frame.locator("#dailydate").count().catch(() => 0)) > 0) return frame;
+  // Wait for the planner to render instead of sleeping a fixed 4s: the date
+  // picker is the positive signal that the daily-log frame is ready. Playwright
+  // polls internally, so this returns the moment the picker attaches.
+  const planner = appFrame(page);
+  const picker = await planner
+    .waitForSelector("#dailydate", { state: "attached", timeout: 12_000 })
+    .catch(() => null);
+  if (picker) return planner;
 
   // Not on the planner yet — route through the sidebar inside the wrapper.
+  let frame = appFrame(page);
   const link = frame.locator("text=/daily\\s*log/i").locator("visible=true");
   await link.first().waitFor({ state: "visible", timeout: 30_000 });
   await link.first().click();
@@ -105,13 +110,29 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
  * keeps auto-login working when the portal rewords its challenge but keeps
  * the same form fields (and vice versa).
  */
-export async function isLoginFormVisible(page: Page, timeoutMs = 3_000): Promise<boolean> {
-  const robot = await page
-    .getByText("I'm not a robot")
-    .isVisible({ timeout: timeoutMs })
-    .catch(() => false);
+/**
+ * Immediate, non-waiting check for the login form: the "I'm not a robot"
+ * challenge text or the username field. Both are checked so auto-login keeps
+ * working when the portal rewords its challenge but keeps the form fields.
+ */
+export async function isLoginFormVisibleNow(page: Page): Promise<boolean> {
+  const robot = await page.getByText("I'm not a robot").isVisible().catch(() => false);
   if (robot) return true;
-  return page.locator("#user_names").isVisible({ timeout: timeoutMs }).catch(() => false);
+  return page.locator("#user_names").isVisible().catch(() => false);
+}
+
+/**
+ * Poll for the login form, returning true as soon as it appears and false once
+ * `timeoutMs` elapses. `locator.isVisible()` does not auto-wait, so this is a
+ * bounded poll rather than two stacked waits.
+ */
+export async function isLoginFormVisible(page: Page, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await isLoginFormVisibleNow(page)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(200);
+  }
 }
 
 /**
@@ -124,8 +145,11 @@ export async function isLoginFormVisible(page: Page, timeoutMs = 3_000): Promise
  */
 export async function ensureLoggedIn(page: Page): Promise<void> {
   await waitForHumanCheck(page);
-  await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => undefined);
-  await page.waitForTimeout(3_000);
+  // Bound the network-idle wait: the portal keeps long-lived connections open,
+  // so it often never fires and would otherwise burn the full timeout on every
+  // run. A short settle plus the login-form poll below is enough.
+  await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => undefined);
+  await page.waitForTimeout(1_500);
 
   if (!(await isLoginFormVisible(page))) return;
 
@@ -168,17 +192,21 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
 async function performSignIn(page: Page, username: string, password: string): Promise<void> {
   // Set the values via evaluate so Chrome's autofill/overlays cannot race or
   // clear them before login() reads the fields.
-  await page.evaluate(
-    ({ u, p }) => {
-      const user = document.querySelector("#user_names") as HTMLInputElement | null;
-      const pass = document.querySelector("#password") as HTMLInputElement | null;
-      if (!user || !pass) throw new Error("login fields not found");
-      user.value = u;
-      pass.value = p;
-      user.dispatchEvent(new Event("input", { bubbles: true }));
-      pass.dispatchEvent(new Event("input", { bubbles: true }));
-    },
-    { u: username, p: password },
+  await withTimeout(
+    page.evaluate(
+      ({ u, p }) => {
+        const user = document.querySelector("#user_names") as HTMLInputElement | null;
+        const pass = document.querySelector("#password") as HTMLInputElement | null;
+        if (!user || !pass) throw new Error("login fields not found");
+        user.value = u;
+        pass.value = p;
+        user.dispatchEvent(new Event("input", { bubbles: true }));
+        pass.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+      { u: username, p: password },
+    ),
+    15_000,
+    "Filling the login form",
   );
 
   const actualUser = await page.locator("#user_names").inputValue().catch(() => "");
@@ -188,12 +216,16 @@ async function performSignIn(page: Page, username: string, password: string): Pr
   }
 
   // Tick the "I'm not a robot" checkbox deterministically and verify.
-  await page.evaluate(() => {
-    const box = document.querySelector("#imrobot") as HTMLInputElement | null;
-    if (!box) throw new Error("robot checkbox not found");
-    box.checked = true;
-    box.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  await withTimeout(
+    page.evaluate(() => {
+      const box = document.querySelector("#imrobot") as HTMLInputElement | null;
+      if (!box) throw new Error("robot checkbox not found");
+      box.checked = true;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+    }),
+    15_000,
+    "Ticking the robot checkbox",
+  );
   const checked = await page.locator("#imrobot").isChecked().catch(() => false);
   if (!checked) await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
 

@@ -11,9 +11,18 @@ import { sleep } from "./utils.js";
 
 const TELEGRAM_API = "https://api.telegram.org/bot";
 const OFFSET_FILE = () => path.join(config.stateDir, "telegram-offset.json");
-/** Absolute path to src/daily.ts, independent of the process working directory. */
-const DAILY_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "daily.ts");
-const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const MODULE_PATH = fileURLToPath(import.meta.url);
+const MODULE_DIR = path.dirname(MODULE_PATH);
+/**
+ * True when this file is the compiled `dist/*.js` build rather than the tsx-run
+ * TypeScript source. Compiled runs spawn the sibling `.js` entry with plain
+ * node (no tsx), so the Telegram bot keeps working even when the tsx package
+ * is unavailable (e.g. evicted by iCloud).
+ */
+const COMPILED = path.extname(MODULE_PATH) === ".js";
+/** Absolute path to the daily-run entry, independent of the process working directory. */
+const DAILY_SCRIPT = path.join(MODULE_DIR, COMPILED ? "daily.js" : "daily.ts");
+const PROJECT_DIR = path.resolve(MODULE_DIR, "..");
 
 interface TelegramUpdate {
   update_id: number;
@@ -42,18 +51,22 @@ function escapeHtml(text: string): string {
 }
 
 async function sendMessage(chatId: number, text: string): Promise<void> {
-  await fetch(botUrl("sendMessage"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-    }),
-    signal: AbortSignal.timeout(20_000),
-  }).catch((error) => {
+  try {
+    const response = await fetch(botUrl("sendMessage"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML",
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    // Surface a rejected send instead of silently believing it was delivered.
+    if (!response.ok) logWarn(`Telegram sendMessage failed: HTTP ${response.status}.`);
+  } catch (error) {
     logError(`Failed to send Telegram message to ${chatId}: ${(error as Error).message}`);
-  });
+  }
 }
 
 async function getUpdates(offset: number): Promise<TelegramUpdate[]> {
@@ -96,7 +109,8 @@ async function saveOffset(offset: number): Promise<void> {
  * notifications on completion, so a bot restart mid-run loses nothing.
  */
 function spawnRun(chatId: number): void {
-  const args = ["--import", "tsx", DAILY_SCRIPT, "--lookback-days", String(config.lookbackDays), "--notify-summary"];
+  const loader: string[] = COMPILED ? [] : ["--import", "tsx"];
+  const args = [...loader, DAILY_SCRIPT, "--lookback-days", String(config.lookbackDays), "--notify-summary"];
   logInfo(`Spawning run: ${process.execPath} ${args.join(" ")}`);
   const child = spawn(process.execPath, args, {
     cwd: PROJECT_DIR,

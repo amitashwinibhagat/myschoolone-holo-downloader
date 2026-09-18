@@ -16,6 +16,7 @@ import { config } from "./config.js";
 import { waitForHumanCheck, withBrowserSession } from "./browser.js";
 import { notify } from "./notify.js";
 import { appFrame, ensureLoggedIn, NeedsHumanLoginError } from "./portal.js";
+import { withTimeout } from "./utils.js";
 
 const FINGERPRINT_FILE = "portal-fingerprint.json";
 
@@ -44,6 +45,56 @@ export interface HealthCheckResult {
 }
 
 /**
+ * Structural fingerprint of the portal's Daily Log page, read inside the
+ * browser: key DOM selectors, external script names, and AJAX endpoints.
+ * Self-contained (no closure over Node values) so it can be handed to
+ * `frame.evaluate()` directly.
+ */
+function readPortalStructure(): { selectors: Record<string, string>; scripts: string[]; endpoints: string[] } {
+  const selectors: Record<string, string> = {};
+
+  // Check for key DOM elements
+  const dateInput = document.querySelector("#dailydate");
+  if (dateInput) selectors.dailydate = dateInput.tagName + (dateInput.className ? `.${dateInput.className.split(" ")[0]}` : "");
+
+  const sidebar = document.querySelector("[class*='sidebar'], [class*='menu'], nav");
+  if (sidebar) selectors.sidebar = sidebar.tagName + (sidebar.className ? `.${sidebar.className.split(" ")[0]}` : "");
+
+  const contentArea = document.querySelector("[class*='content'], [class*='main'], main");
+  if (contentArea) selectors.contentArea = contentArea.tagName + (contentArea.className ? `.${contentArea.className.split(" ")[0]}` : "");
+
+  // Check for tab-like navigation
+  const tabs = document.querySelectorAll("[class*='tab'], [role='tab']");
+  selectors.tabCount = String(tabs.length);
+
+  // Collect script sources (external only)
+  const scripts = Array.from(document.querySelectorAll("script[src]"))
+    .map((s) => (s as HTMLScriptElement).src)
+    .filter((src) => !src.includes("google") && !src.includes("analytics"))
+    .slice(0, 10);
+
+  // Look for AJAX endpoint patterns in inline scripts
+  const inlineScripts = Array.from(document.querySelectorAll("script:not([src])"))
+    .map((s) => s.textContent || "")
+    .join("\n");
+
+  const endpoints: string[] = [];
+  const endpointPatterns = [
+    /url\s*:\s*["']([^"']+)["']/gi,
+    /\.ajax\s*\(\s*["']([^"']+)["']/gi,
+    /fetch\s*\(\s*["']([^"']+)["']/gi,
+  ];
+  for (const pattern of endpointPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(inlineScripts)) !== null) {
+      if (!endpoints.includes(match[1])) endpoints.push(match[1]);
+    }
+  }
+
+  return { selectors, scripts: scripts.map((s) => s.split("/").pop() || s), endpoints: endpoints.slice(0, 10) };
+}
+
+/**
  * Capture a structural fingerprint of the portal's Daily Log page.
  * This includes:
  * - Key DOM selectors (date picker, content area, sidebar)
@@ -61,49 +112,11 @@ async function captureFingerprint(page: Page): Promise<PortalFingerprint> {
   // The portal app renders inside a sub-frame; fingerprinting the top-level
   // frameset would hash an empty shell and flag phantom "changes". Read the
   // same app frame the downloader itself drives.
-  const fingerprint = await appFrame(page).evaluate(() => {
-    const selectors: Record<string, string> = {};
-
-    // Check for key DOM elements
-    const dateInput = document.querySelector("#dailydate");
-    if (dateInput) selectors.dailydate = dateInput.tagName + (dateInput.className ? `.${dateInput.className.split(" ")[0]}` : "");
-
-    const sidebar = document.querySelector("[class*='sidebar'], [class*='menu'], nav");
-    if (sidebar) selectors.sidebar = sidebar.tagName + (sidebar.className ? `.${sidebar.className.split(" ")[0]}` : "");
-
-    const contentArea = document.querySelector("[class*='content'], [class*='main'], main");
-    if (contentArea) selectors.contentArea = contentArea.tagName + (contentArea.className ? `.${contentArea.className.split(" ")[0]}` : "");
-
-    // Check for tab-like navigation
-    const tabs = document.querySelectorAll("[class*='tab'], [role='tab']");
-    selectors.tabCount = String(tabs.length);
-
-    // Collect script sources (external only)
-    const scripts = Array.from(document.querySelectorAll("script[src]"))
-      .map((s) => (s as HTMLScriptElement).src)
-      .filter((src) => !src.includes("google") && !src.includes("analytics"))
-      .slice(0, 10);
-
-    // Look for AJAX endpoint patterns in inline scripts
-    const inlineScripts = Array.from(document.querySelectorAll("script:not([src])"))
-      .map((s) => s.textContent || "")
-      .join("\n");
-
-    const endpoints: string[] = [];
-    const endpointPatterns = [
-      /url\s*:\s*["']([^"']+)["']/gi,
-      /\.ajax\s*\(\s*["']([^"']+)["']/gi,
-      /fetch\s*\(\s*["']([^"']+)["']/gi,
-    ];
-    for (const pattern of endpointPatterns) {
-      let match: RegExpExecArray | null;
-      while ((match = pattern.exec(inlineScripts)) !== null) {
-        if (!endpoints.includes(match[1])) endpoints.push(match[1]);
-      }
-    }
-
-    return { selectors, scripts: scripts.map((s) => s.split("/").pop() || s), endpoints: endpoints.slice(0, 10) };
-  });
+  const fingerprint = await withTimeout(
+    appFrame(page).evaluate(readPortalStructure),
+    20_000,
+    "Fingerprinting the portal",
+  );
 
   const content = JSON.stringify(fingerprint.selectors) + JSON.stringify(fingerprint.scripts) + JSON.stringify(fingerprint.endpoints);
   const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);

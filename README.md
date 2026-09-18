@@ -44,7 +44,7 @@ Raspberry-Pi-class Mac into a quiet pipeline:
   accepted after **two consecutive** sightings, so a transient Cloudflare
   interstitial never silently rewrites the baseline. You get notified *before*
   downloads break, not after.
-- **📅 Set-and-forget scheduling** — a macOS LaunchAgent runs weekday mornings
+- **📅 Set-and-forget scheduling** — a macOS LaunchAgent runs weekday afternoons
   and evenings (IST), reconciling the last 7 days each time, with an exclusive
   run lock so manual and scheduled runs never collide.
 - **💬 Telegram remote control** — `/run`, `/status`, `/help` from your phone;
@@ -125,6 +125,24 @@ Once manual runs work:
 Schedule times live in one place (`src/schedule-window.ts`); the installers
 read them from there so the plists can't drift from the code.
 
+By default the installers run the TypeScript sources through `tsx`. For a
+lighter runtime that does not depend on the `tsx` package being present, build
+once and reinstall:
+
+```bash
+npm run build
+./scripts/install-launch-agent.sh
+```
+
+The installers prefer `dist/` when it exists and fall back to `tsx` otherwise.
+
+> **Keep this project out of iCloud's eviction path.** macOS "Optimize Mac
+> Storage" can evict files from iCloud Drive — including `node_modules/` — which
+> breaks the scheduled run (`Unknown system error -11`, or a missing `tsx`)
+> before any photo is downloaded. Either keep the repo outside iCloud Drive, or
+> right-click the project folder in Finder → **Keep Downloaded**, and prefer the
+> compiled `dist/` runtime above.
+
 > Scheduled GUI automation needs an unlocked macOS user session. For unattended
 > recovery after power failure, enable automatic login and `pmset autorestart 1`.
 
@@ -140,6 +158,7 @@ read them from there so the plists can't drift from the code.
 | `npm run capture` | Save screenshot + HTML of a troublesome page to `debug/` |
 | `npm run telegram-bot` | Run the Telegram bot in the foreground |
 | `npm run check` / `npm test` | Type-check / run the test suite |
+| `npm run build` | Compile `src/` to `dist/` for a tsx-free runtime |
 
 ## 🛟 Failure recovery
 

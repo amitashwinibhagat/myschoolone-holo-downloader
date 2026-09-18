@@ -58,7 +58,7 @@ async function collectImages(dir: string): Promise<string[]> {
   return entries
     .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
     .map((name) => path.join(dir, name))
-    .sort(); // alphabetical = chronological (filenames contain a hash prefix)
+    .sort(); // deterministic order; filenames are prefixed with a content hash
 }
 
 async function main(): Promise<void> {

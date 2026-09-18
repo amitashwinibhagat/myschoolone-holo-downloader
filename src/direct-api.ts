@@ -2,8 +2,8 @@
  * Direct HTTP client for the MySchoolOne Pro portal.
  *
  * Bypasses Playwright entirely by using saved session cookies to make
- * HTTP requests directly. This is faster, cheaper (no AI), and more
- * reliable than the browser-based path for the common daily-download case.
+ * HTTP requests directly. This is faster and more reliable than the
+ * browser-based path for the common daily-download case.
  *
  * Strategy:
  * 1. Load cookies from the saved Playwright storage state
@@ -17,7 +17,7 @@
  *    exists yet.
  */
 import { config } from "./config.js";
-import { daysAgoIso, isoToPortalDate } from "./utils.js";
+import { daysAgoIso, exceedsMaxSize, isoToPortalDate, MAX_ATTACHMENT_BYTES } from "./utils.js";
 import {
   loadDiscoveryFile,
   DATE_VALUE_PATTERN,
@@ -261,8 +261,12 @@ export async function fetchAttachmentBuffer(
 
   if (!response.ok) return null;
 
+  // Refuse an oversized attachment before buffering it into memory.
+  if (exceedsMaxSize(response.headers.get("content-length"))) return null;
+
   const contentType = response.headers.get("content-type") || "";
   const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > MAX_ATTACHMENT_BYTES) return null;
   return { buffer: Buffer.from(arrayBuffer), contentType };
 }
 

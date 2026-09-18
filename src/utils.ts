@@ -6,6 +6,47 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Reject if `promise` has not settled within `ms`. Used to bound in-page
+ * `evaluate()` calls, which Playwright does not time out on its own — a hung
+ * page would otherwise stall a whole run. The timer is unref'd so a pending
+ * timeout never keeps the process alive.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Generous cap so a pathological response cannot exhaust memory. */
+export const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * True when a declared `Content-Length` exceeds the attachment size cap. The
+ * header lets callers refuse an oversized body *before* buffering it; a body
+ * that arrives without the header (chunked) is still bounded after the fact by
+ * `saveBuffer`'s own length check.
+ */
+export function exceedsMaxSize(
+  contentLength: string | null | undefined,
+  max = MAX_ATTACHMENT_BYTES,
+): boolean {
+  if (!contentLength) return false;
+  const bytes = Number(contentLength);
+  return Number.isFinite(bytes) && bytes > max;
+}
+
+/**
  * Map an async function over `items` with at most `limit` tasks in flight at
  * once. Results preserve input order. A task that throws does not cancel or
  * reject its siblings — callers that need per-item isolation should catch

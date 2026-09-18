@@ -58,29 +58,51 @@ export class DownloadStore {
     this.filePath = path.join(stateDir, "downloads.json");
   }
 
+  /**
+   * Move an unreadable state file aside (never delete user data) and reset to
+   * an empty store so every command keeps working; `npm run rescan` rebuilds
+   * the hash index from the download folder.
+   */
+  private async quarantine(reason: string): Promise<void> {
+    const backup = `${this.filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    await fs.rename(this.filePath, backup).catch(() => undefined);
+    console.warn(`Download index was ${reason} — moved to ${backup} and starting fresh.`);
+    this.data = { records: [], runs: [] };
+    this.hashes = new Set();
+  }
+
   async load(): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    let parsed: unknown;
     try {
-      this.data = JSON.parse(await fs.readFile(this.filePath, "utf8")) as StoreData;
-      // Legacy files have no schemaVersion; keep them working as-is.
-      this.data.records ??= [];
-      this.data.runs ??= [];
-      this.hashes = new Set(this.data.records.map((r) => r.hash));
+      parsed = JSON.parse(await fs.readFile(this.filePath, "utf8"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      if (error instanceof SyntaxError) {
-        // A crash or full disk mid-write can leave half-written JSON behind.
-        // Quarantine it (never delete user data) and start empty so every
-        // command keeps working; `npm run rescan` rebuilds the hash index.
-        const backup = `${this.filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-        await fs.rename(this.filePath, backup).catch(() => undefined);
-        console.warn(`Download index was corrupt — moved to ${backup} and starting fresh.`);
-        this.data = { records: [], runs: [] };
-        this.hashes = new Set();
-        return;
-      }
+      // A crash or full disk mid-write can leave half-written JSON behind.
+      if (error instanceof SyntaxError) return this.quarantine("corrupt");
       throw error;
     }
+
+    // Valid JSON can still be the wrong shape (hand-edited, truncated to a
+    // bare `{}`, or written by another tool). Treat that like corrupt state
+    // instead of letting `records.map` throw a TypeError that would break
+    // every command (status, daily, scheduled, Telegram /status).
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return this.quarantine("not a store object");
+    }
+    const candidate = parsed as StoreData;
+    if (candidate.records !== undefined && !Array.isArray(candidate.records)) {
+      return this.quarantine("missing a records array");
+    }
+    if (candidate.runs !== undefined && !Array.isArray(candidate.runs)) {
+      return this.quarantine("missing a runs array");
+    }
+
+    this.data = candidate;
+    // Legacy files have no schemaVersion; keep them working as-is.
+    this.data.records ??= [];
+    this.data.runs ??= [];
+    this.hashes = new Set(this.data.records.map((r) => r.hash));
   }
 
   hasHash(hash: string): boolean {
@@ -137,8 +159,14 @@ export class DownloadStore {
     this.pruneRecords();
     this.data.schemaVersion = SCHEMA_VERSION;
     const temp = `${this.filePath}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
-    await fs.rename(temp, this.filePath);
+    try {
+      await fs.writeFile(temp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+      await fs.rename(temp, this.filePath);
+    } catch (error) {
+      // Never leave a half-written .tmp behind to confuse the next load.
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
     this.dirty = false;
   }
 

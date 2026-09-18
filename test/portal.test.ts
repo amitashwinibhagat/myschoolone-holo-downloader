@@ -62,7 +62,17 @@ test("isLoginFormVisible: false on the logged-in dashboard", async () => {
     getByText: () => ({ isVisible: async () => false }),
     locator: () => ({ isVisible: async () => false }),
   };
-  assert.equal(await isLoginFormVisible(page as never), false);
+  assert.equal(await isLoginFormVisible(page as never, 0), false);
+});
+
+test("isLoginFormVisible: polls until the form appears within the timeout", async () => {
+  let checks = 0;
+  const page = {
+    getByText: () => ({ isVisible: async () => false }),
+    locator: () => ({ isVisible: async () => ++checks >= 2 }),
+  };
+  assert.equal(await isLoginFormVisible(page as never, 1_000), true);
+  assert.ok(checks >= 2, `expected at least 2 checks, got ${checks}`);
 });
 
 // Minimal stubs for openDailyLogFrame: a child frame plus a page whose
@@ -75,6 +85,12 @@ function stubChildFrame(options: { dailydate: number; gotoImpl?: () => Promise<v
   };
   return {
     goto: options.gotoImpl ?? (async () => undefined),
+    // Mimic Playwright: resolve when the picker is present, otherwise behave
+    // like a timeout (reject), which the caller catches and falls back on.
+    waitForSelector: async (selector: string) => {
+      if (selector === "#dailydate" && options.dailydate > 0) return {};
+      throw new Error(`Timeout waiting for selector "${selector}"`);
+    },
     locator: (selector: string) => {
       if (selector === "#dailydate") return { count: async () => options.dailydate };
       return { locator: () => sidebarMatches, count: async () => 0 };

@@ -39,6 +39,39 @@ test("directNeedsFallback: saved or duplicate URLs mean the direct result is tru
   assert.equal(directNeedsFallback(totals({ duplicates: 2, daysChecked: 1 }), outcome(), 0), false);
 });
 
+test("directNeedsFallback: a stale discovery capture forces a browser verification even when URLs were found", () => {
+  assert.equal(
+    directNeedsFallback(
+      totals({ saved: 2, daysChecked: 3 }),
+      outcome({ discoveryUsed: true, discoveryFresh: false, discoveryComplete: true }),
+      0,
+    ),
+    true,
+  );
+});
+
+test("directNeedsFallback: an incomplete discovery capture forces a browser verification even when URLs were found", () => {
+  assert.equal(
+    directNeedsFallback(
+      totals({ saved: 2, daysChecked: 3 }),
+      outcome({ discoveryUsed: true, discoveryFresh: true, discoveryComplete: false }),
+      0,
+    ),
+    true,
+  );
+});
+
+test("directNeedsFallback: a fresh, complete discovery with URLs found is trusted", () => {
+  assert.equal(
+    directNeedsFallback(
+      totals({ saved: 2, daysChecked: 3 }),
+      outcome({ discoveryUsed: true, discoveryFresh: true, discoveryComplete: true }),
+      0,
+    ),
+    false,
+  );
+});
+
 test("directNeedsFallback: an all-empty window always falls back once, even with fresh discovery", () => {
   // A stale captured `type` value could otherwise silently hide real photos.
   assert.equal(directNeedsFallback(totals({ daysChecked: 7 }), outcome(), 0), true);
