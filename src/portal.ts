@@ -61,6 +61,28 @@ export function isNavigationInterrupted(error: unknown): boolean {
  * in-app route. Shared by the daily run and the backfill so the behaviour
  * cannot drift between them.
  */
+/**
+ * Find the sub-frame currently hosting the planner date picker / the sidebar
+ * menu. Both are re-scanned on every call because App.php rebuilds its
+ * sub-frames whenever it navigates (invalidating held handles), and neither
+ * widget is guaranteed to live in the first sub-frame.
+ */
+async function findPickerFrame(page: Page): Promise<Frame | undefined> {
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    if ((await frame.locator("#dailydate").count().catch(() => 0)) > 0) return frame;
+  }
+  return undefined;
+}
+
+async function findSidebarFrame(page: Page): Promise<Frame | undefined> {
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    if ((await frame.locator("text=/daily\\s*log/i").count().catch(() => 0)) > 0) return frame;
+  }
+  return undefined;
+}
+
 export async function openDailyLogFrame(page: Page): Promise<Frame> {
   const url = new URL(DAILY_LOG_PATH, config.schoolUrl).toString();
 
@@ -73,25 +95,35 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
     await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
   }
 
-  // Wait for the planner to render, re-resolving the frame every round: the
-  // App.php wrapper rebuilds its sub-frames while we wait, so a frame handle
-  // captured up front can go stale mid-wait ("Frame was detached"). The date
-  // picker is the positive readiness signal; Playwright polls internally, so
-  // this returns the moment the picker attaches to whichever frame is live.
-  for (let waited = 0; waited < 12_000; waited += 2_000) {
-    const picker = await appFrame(page)
-      .waitForSelector("#dailydate", { state: "attached", timeout: 2_000 })
-      .catch(() => null);
-    if (picker) return appFrame(page);
+  // Wait for the planner to render, re-scanning all sub-frames every round:
+  // the App.php wrapper rebuilds its frames while we wait (handles go stale)
+  // and the picker may live in any sub-frame. The date picker is the positive
+  // readiness signal.
+  for (let waited = 0; waited < 16_000; waited += 2_000) {
+    const picker = await findPickerFrame(page);
+    if (picker) return picker;
+    await page.waitForTimeout(2_000);
   }
 
   // Not on the planner yet — route through the sidebar inside the wrapper.
-  // Same freshness rule: every wait/click re-resolves the live frame, so the
-  // wrapper's rebuild can never invalidate the handle we are acting on.
-  const sidebarDeadline = Date.now() + 45_000;
-  for (;;) {
-    if (Date.now() > sidebarDeadline) break;
-    const frame = appFrame(page);
+  // Bounded by rounds, not wall-clock: each round re-scans the live frames,
+  // so total wait scales with what the wrapper is actually doing (~2s per
+  // empty round, longer only when a real click is in progress).
+  for (let round = 0; round < 12; round += 1) {
+    // A cold session can bounce back to the login form after the wrapper
+    // reload (rejected cookie / expired redirect). Re-signing in once
+    // recovers without burning the whole attempt.
+    if (await isLoginFormVisibleNow(page)) {
+      console.log("Session bounced back to the login form — signing in again...");
+      await ensureLoggedIn(page);
+      continue;
+    }
+
+    const frame = await findSidebarFrame(page);
+    if (!frame) {
+      await page.waitForTimeout(2_000);
+      continue;
+    }
     const link = frame.locator("text=/daily\\s*log/i").locator("visible=true");
     const appeared = await link
       .first()
@@ -104,18 +136,27 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
 
     // The sidebar expands into a parent item plus a submenu. When more than
     // one "Daily Log" entry is visible, click the deepest (submenu) one.
-    const matches = appFrame(page).locator("text=/daily\\s*log/i").locator("visible=true");
-    if ((await matches.count().catch(() => 0)) > 1) {
+    const matches = (await findSidebarFrame(page))?.locator("text=/daily\\s*log/i").locator("visible=true");
+    if (matches && (await matches.count().catch(() => 0)) > 1) {
       await matches.last().click().catch(() => undefined);
       await page.waitForTimeout(6_000);
     }
-    const finalFrame = appFrame(page);
-    if ((await finalFrame.locator("#dailydate").count().catch(() => 0)) > 0) return finalFrame;
+    const finalFrame = await findPickerFrame(page);
+    if (finalFrame) return finalFrame;
     // Picker not up yet — pace the retry so we never click-spam the menu
     // while the wrapper is still rebuilding.
     await sleep(2_000);
   }
 
+  // Blind-spot insurance: describe the portal state before failing (URL
+  // paths only — never page content, run logs are public). This turns the
+  // next failure into an aimed fix instead of a guess.
+  const frameUrls = page.frames().map((frame) => frame.url());
+  console.error(
+    `Portal state at failure — top: ${page.url()}; frames: ${
+      frameUrls.filter(Boolean).join(" | ") || "(none)"
+    }`,
+  );
   // Never hand back a frame that is not the planner: downstream code would
   // silently harvest the wrong view into a mislabeled date folder. Fail
   // loudly so the run retries, captures failure debug, and notifies.

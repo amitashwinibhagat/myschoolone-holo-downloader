@@ -83,8 +83,15 @@ function stubChildFrame(options: { dailydate: number; gotoImpl?: () => Promise<v
     last: () => ({ click: async () => undefined }),
     count: async () => 0,
   };
+  const permissiveLocator = {
+    isVisible: async () => false,
+    locator: () => sidebarMatches,
+    first: () => ({ waitFor: async () => undefined, click: async () => undefined }),
+    count: async () => 0,
+  };
   return {
     goto: options.gotoImpl ?? (async () => undefined),
+    url: () => "https://portal.example/Web/LearningManagement/daily_planner_parent.php",
     // Mimic Playwright: resolve when the picker is present, otherwise behave
     // like a timeout (reject), which the caller catches and falls back on.
     waitForSelector: async (selector: string) => {
@@ -93,14 +100,22 @@ function stubChildFrame(options: { dailydate: number; gotoImpl?: () => Promise<v
     },
     locator: (selector: string) => {
       if (selector === "#dailydate") return { count: async () => options.dailydate };
-      return { locator: () => sidebarMatches, count: async () => 0 };
+      return permissiveLocator;
     },
   };
 }
 
 function stubPortalPage(child: ReturnType<typeof stubChildFrame>) {
-  const main = {};
-  return { frames: () => [main, child], mainFrame: () => main, waitForTimeout: async () => undefined, waitForLoadState: async () => undefined };
+  const main = { url: () => "https://portal.example/Web/App.php" };
+  return {
+    frames: () => [main, child],
+    mainFrame: () => main,
+    waitForTimeout: async () => undefined,
+    waitForLoadState: async () => undefined,
+    url: () => "https://portal.example/Web/App.php",
+    getByText: () => ({ isVisible: async () => false }),
+    locator: () => ({ isVisible: async () => false }),
+  };
 }
 
 test("openDailyLogFrame: returns the planner frame when the date picker is present", async () => {
