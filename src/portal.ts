@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Frame, Page } from "playwright";
-import { waitForHumanCheck } from "./browser.js";
+import { detectChallengeText, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
+import { createHash } from "node:crypto";
 import { isClosedTargetError, redactPasswordValues, sleep, withTimeout } from "./utils.js";
 
 /**
@@ -93,6 +94,20 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
     console.warn("Frame navigation interrupted by the App.php wrapper — waiting for it to settle...");
     await page.waitForTimeout(2_000);
     await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+
+    // The interrupted goto usually still leaves the wrapper loading its own
+    // sub-frames — but not always the planner. One bounded re-drive gives the
+    // navigation a second chance; a challenge shown instead is waited out.
+    if (await detectChallengeText(page)) await waitForHumanCheck(page);
+    console.log("Re-driving the planner navigation once after the wrapper settled...");
+    try {
+      await appFrame(page).goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch (retryError) {
+      if (!isNavigationInterrupted(retryError)) throw retryError;
+      console.warn("Re-drive interrupted as well — letting the wrapper settle and continuing...");
+      await page.waitForTimeout(2_000);
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+    }
   }
 
   // Wait for the planner to render, re-scanning all sub-frames every round:
@@ -151,10 +166,20 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
   // Blind-spot insurance: describe the portal state before failing (URL
   // paths only — never page content, run logs are public). This turns the
   // next failure into an aimed fix instead of a guess.
-  const frameUrls = page.frames().map((frame) => frame.url());
+  // Paths + a short URL hash only (never full URLs — they contain the
+  // SCHOOL_URL secret, which GitHub masks into uselessness — and never page
+  // content, run logs are public). Enough to tell login page vs. app shell
+  // vs. planner without leaking anything.
+  const describe = (u: string): string => {
+    if (!u) return "";
+    const path = u.replace(/^https?:\/\/[^/]+/i, "");
+    const hash = createHash("sha256").update(u).digest("hex").slice(0, 8);
+    return `${path}#${hash}`;
+  };
+  const frameDescs = page.frames().map((frame) => describe(frame.url()));
   console.error(
-    `Portal state at failure — top: ${page.url()}; frames: ${
-      frameUrls.filter(Boolean).join(" | ") || "(none)"
+    `Portal state at failure — top: ${describe(page.url())}; frames: ${
+      frameDescs.filter(Boolean).join(" | ") || "(none)"
     }`,
   );
   // Never hand back a frame that is not the planner: downstream code would

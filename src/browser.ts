@@ -154,6 +154,32 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
   return { context, getPage: () => resolveActivePage(context.pages(), activePage) };
 }
 
+const CHALLENGE_MARKERS = [
+  "Verifying you are human",
+  "Just a moment",
+  "Checking your browser",
+  "needs to review the security of your connection",
+];
+
+/**
+ * True when any frame currently shows a Cloudflare challenge interstitial.
+ * Scans sub-frames too: the portal serves the app in a frameset, and a
+ * challenge issued during a frame navigation appears inside that frame, not
+ * in the top-level body. Purely observational (bounded body-text reads).
+ */
+export async function detectChallengeText(page: Page): Promise<boolean> {
+  for (const frame of page.frames()) {
+    let text = "";
+    try {
+      text = await frame.locator("body").innerText({ timeout: 2_000 });
+    } catch {
+      text = "";
+    }
+    if (CHALLENGE_MARKERS.some((marker) => text.includes(marker))) return true;
+  }
+  return false;
+}
+
 /**
  * Waits for a Cloudflare "Verifying you are human" interstitial to clear.
  * With a clean fingerprint the challenge usually passes automatically within a
@@ -161,17 +187,9 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
  */
 export async function waitForHumanCheck(page: Page, timeoutMs = 45_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const markers = [
-    "Verifying you are human",
-    "Just a moment",
-    "Checking your browser",
-    "needs to review the security of your connection",
-  ];
 
   while (Date.now() < deadline) {
-    const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
-    const challenged = markers.some((marker) => text.includes(marker));
-    if (!challenged) return;
+    if (!(await detectChallengeText(page))) return;
     console.log("Cloudflare human check detected — waiting for it to clear...");
     await page.waitForTimeout(2_500);
   }
