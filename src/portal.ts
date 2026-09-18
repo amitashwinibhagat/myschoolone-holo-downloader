@@ -84,6 +84,21 @@ async function findSidebarFrame(page: Page): Promise<Frame | undefined> {
   return undefined;
 }
 
+/**
+ * True once the App.php shell has mounted at least one sub-frame. Deep-link
+ * navigations bounce to the tenant root until the shell bootstraps, so this
+ * is the gate that tells "ready to navigate inside the app" from "still on a
+ * stub page".
+ */
+async function waitForAppShell(page: Page, timeoutMs = 12_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (page.frames().length > 1) return true;
+    await page.waitForTimeout(1_000);
+  }
+  return false;
+}
+
 export async function openDailyLogFrame(page: Page): Promise<Frame> {
   const url = new URL(DAILY_LOG_PATH, config.schoolUrl).toString();
 
@@ -96,9 +111,19 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
     await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
 
     // The interrupted goto usually still leaves the wrapper loading its own
-    // sub-frames — but not always the planner. One bounded re-drive gives the
-    // navigation a second chance; a challenge shown instead is waited out.
+    // sub-frames — but not always the planner, and on a cold session the
+    // bounce can leave the browser on the tenant root with NO frames at all.
+    // In that state nothing can be clicked or waited for: enter through the
+    // front door once so the shell can bootstrap, then re-drive the planner.
     if (await detectChallengeText(page)) await waitForHumanCheck(page);
+    if (!(await waitForAppShell(page))) {
+      console.log("App shell did not mount — entering through the portal front door once...");
+      await page.goto(config.schoolUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+      await page.waitForTimeout(3_000);
+      if (await detectChallengeText(page)) await waitForHumanCheck(page);
+      if (!(await isLoginFormVisibleNow(page))) await waitForAppShell(page, 15_000);
+    }
     console.log("Re-driving the planner navigation once after the wrapper settled...");
     try {
       await appFrame(page).goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -263,6 +288,11 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       await performSignIn(page, username, password);
+      // The portal redirects through the app shell after sign-in; let that
+      // chain land before any deep-link navigation — a goto racing it gets
+      // bounced to the tenant root.
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+      await page.waitForTimeout(2_000);
       return;
     } catch (error) {
       if (attempt === 2) throw error;

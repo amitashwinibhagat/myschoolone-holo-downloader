@@ -123,6 +123,15 @@ jobs:
           echo "--- captured browser/process stderr (tail) ---"
           tail -50 /tmp/chrome-stderr.log 2>/dev/null || true
 
+      - name: Upload failure debug captures to R2 (private bucket)
+        if: failure()
+        # Screenshots/HTML snapshots of the failure moment, for inspection in
+        # the Cloudflare dashboard. Never committed, never made public.
+        run: |
+          ls -la "$STATE_DIR/debug" 2>/dev/null || echo "(no debug captures)"
+          aws s3 sync "$STATE_DIR/debug" "s3://$R2_BUCKET/debug/$GITHUB_RUN_ID/" \
+            --endpoint-url "$R2_ENDPOINT" || true
+
       - name: Sync new photos to R2 (also on failure — dedupe keeps this safe)
         if: always()
         run: |
