@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Frame, Page } from "playwright";
 import { waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
-import { redactPasswordValues, sleep, withTimeout } from "./utils.js";
+import { isClosedTargetError, redactPasswordValues, sleep, withTimeout } from "./utils.js";
 
 /**
  * Raised when the portal shows a login form but the browser cannot complete
@@ -37,6 +37,12 @@ export const DAILY_LOG_PATH = "/Web/LearningManagement/daily_planner_parent.php"
  */
 export function isNavigationInterrupted(error: unknown): boolean {
   const message = (error as Error)?.message || "";
+  // A closed target during post-login navigation is the same wrapper race in
+  // another costume: on a cold session (fresh cloud profile) the programmatic
+  // sign-in lands mid-redirect, and the transitional frame our goto targeted
+  // is torn down by App.php's rebuild — Playwright reports the target as
+  // closed instead of an interrupted navigation.
+  if (isClosedTargetError(error)) return true;
   return /interrupted by another navigation|ERR_ABORTED|No frame with given id found|Frame has been detached/.test(
     message,
   );
@@ -67,41 +73,56 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
     await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
   }
 
-  // Wait for the planner to render instead of sleeping a fixed 4s: the date
-  // picker is the positive signal that the daily-log frame is ready. Playwright
-  // polls internally, so this returns the moment the picker attaches.
-  const planner = appFrame(page);
-  const picker = await planner
-    .waitForSelector("#dailydate", { state: "attached", timeout: 12_000 })
-    .catch(() => null);
-  if (picker) return planner;
+  // Wait for the planner to render, re-resolving the frame every round: the
+  // App.php wrapper rebuilds its sub-frames while we wait, so a frame handle
+  // captured up front can go stale mid-wait ("Frame was detached"). The date
+  // picker is the positive readiness signal; Playwright polls internally, so
+  // this returns the moment the picker attaches to whichever frame is live.
+  for (let waited = 0; waited < 12_000; waited += 2_000) {
+    const picker = await appFrame(page)
+      .waitForSelector("#dailydate", { state: "attached", timeout: 2_000 })
+      .catch(() => null);
+    if (picker) return appFrame(page);
+  }
 
   // Not on the planner yet — route through the sidebar inside the wrapper.
-  let frame = appFrame(page);
-  const link = frame.locator("text=/daily\\s*log/i").locator("visible=true");
-  await link.first().waitFor({ state: "visible", timeout: 30_000 });
-  await link.first().click();
-  await page.waitForTimeout(2_000);
+  // Same freshness rule: every wait/click re-resolves the live frame, so the
+  // wrapper's rebuild can never invalidate the handle we are acting on.
+  const sidebarDeadline = Date.now() + 45_000;
+  for (;;) {
+    if (Date.now() > sidebarDeadline) break;
+    const frame = appFrame(page);
+    const link = frame.locator("text=/daily\\s*log/i").locator("visible=true");
+    const appeared = await link
+      .first()
+      .waitFor({ state: "visible", timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!appeared) continue;
+    await link.first().click().catch(() => undefined);
+    await page.waitForTimeout(2_000);
 
-  // The sidebar expands into a parent item plus a submenu. When more than one
-  // "Daily Log" entry is visible, click the deepest (submenu) one.
-  frame = appFrame(page);
-  const matches = frame.locator("text=/daily\\s*log/i").locator("visible=true");
-  if ((await matches.count().catch(() => 0)) > 1) {
-    await matches.last().click().catch(() => undefined);
-    await page.waitForTimeout(6_000);
+    // The sidebar expands into a parent item plus a submenu. When more than
+    // one "Daily Log" entry is visible, click the deepest (submenu) one.
+    const matches = appFrame(page).locator("text=/daily\\s*log/i").locator("visible=true");
+    if ((await matches.count().catch(() => 0)) > 1) {
+      await matches.last().click().catch(() => undefined);
+      await page.waitForTimeout(6_000);
+    }
+    const finalFrame = appFrame(page);
+    if ((await finalFrame.locator("#dailydate").count().catch(() => 0)) > 0) return finalFrame;
+    // Picker not up yet — pace the retry so we never click-spam the menu
+    // while the wrapper is still rebuilding.
+    await sleep(2_000);
   }
-  const finalFrame = appFrame(page);
-  if ((await finalFrame.locator("#dailydate").count().catch(() => 0)) === 0) {
-    // Never hand back a frame that is not the planner: downstream code would
-    // silently harvest the wrong view into a mislabeled date folder. Fail
-    // loudly so the run retries, captures failure debug, and notifies.
-    throw new Error(
-      "Daily Log page did not load (no date picker found after navigation). " +
-        "The portal layout may have changed — run `npm run health` and `npm run capture`.",
-    );
-  }
-  return finalFrame;
+
+  // Never hand back a frame that is not the planner: downstream code would
+  // silently harvest the wrong view into a mislabeled date folder. Fail
+  // loudly so the run retries, captures failure debug, and notifies.
+  throw new Error(
+    "Daily Log page did not load (no date picker found after navigation). " +
+      "The portal layout may have changed — run `npm run health` and `npm run capture`.",
+  );
 }
 
 /**

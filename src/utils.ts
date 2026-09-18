@@ -6,6 +6,20 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Playwright surfaces a dead browser target in several shapes depending on
+ * what died (tab, context, or whole browser process). All of them mean the
+ * caller's page/frame handle is stale, not that the work itself failed.
+ * Shared by the frame-race recovery in portal.ts and the live-page retry in
+ * run-download.ts so the two cannot disagree about what counts as a stale
+ * handle.
+ */
+export function isClosedTargetError(error: unknown): boolean {
+  return /Target page, context or browser has been closed|Target closed|Browser has been closed|Session closed/.test(
+    (error as Error)?.message ?? "",
+  );
+}
+
+/**
  * Reject if `promise` has not settled within `ms`. Used to bound in-page
  * `evaluate()` calls, which Playwright does not time out on its own — a hung
  * page would otherwise stall a whole run. The timer is unref'd so a pending

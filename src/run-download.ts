@@ -13,22 +13,21 @@ import {
 } from "./direct-api.js";
 import { appFrame, ensureLoggedIn, NeedsHumanLoginError, openDailyLogFrame, writeFailureDebug } from "./portal.js";
 import { checkSession } from "./session.js";
-import { dateInIndia, daysAgoIso, isoToPortalDate, mapWithConcurrency, sleep, withTimeout } from "./utils.js";
+import {
+  dateInIndia,
+  daysAgoIso,
+  isClosedTargetError,
+  isoToPortalDate,
+  mapWithConcurrency,
+  sleep,
+  withTimeout,
+} from "./utils.js";
 
 const ATTACHMENT_PATTERN = /UploadFiles/i;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 60_000;
 
-/**
- * Playwright surfaces a dead browser target in several shapes depending on
- * what died (tab, context, or whole browser process). All of them mean the
- * flow's page handle is stale, not that the work failed.
- */
-export function isClosedTargetError(error: unknown): boolean {
-  return /Target page, context or browser has been closed|Target closed|Browser has been closed|Session closed/.test(
-    (error as Error)?.message ?? "",
-  );
-}
+export { isClosedTargetError };
 
 /**
  * Run a page operation, re-resolving the live page once if the target it was
