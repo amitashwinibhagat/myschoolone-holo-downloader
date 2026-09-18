@@ -1,0 +1,123 @@
+# Scheduled cloud run — replaces the macOS LaunchAgents on free-tier infrastructure.
+#
+# One-time setup (all values live in GitHub Secrets, never in this file):
+#   1. Cloudflare R2: create a bucket (e.g. `myschoolone-photos`) and an S3
+#      API token with Object Read & Write on that bucket.
+#   2. GitHub Secrets:
+#        SCHOOL_URL             exact MySchoolOne Pro portal URL
+#        SCHOOL_USERNAME        portal credentials — required on cloud runners,
+#        SCHOOL_PASSWORD        which start with a fresh browser profile every
+#                               run and therefore rely on auto-login
+#        TELEGRAM_BOT_TOKEN     notifications (photos are sent by the app)
+#        TELEGRAM_CHAT_ID
+#        HEALTHCHECK_URL        optional dead-man ping (the app pings it —
+#                               this workflow must NOT ping it separately)
+#        R2_BUCKET              bucket name
+#        R2_ENDPOINT            https://<account-id>.r2.cloudflarestorage.com
+#        R2_ACCESS_KEY_ID       R2 S3 API token credentials
+#        R2_SECRET_ACCESS_KEY
+#
+# Behaviour notes:
+#   - Cron is UTC; IST is UTC+5:30 all year (no DST), so 09:30/15:30 UTC are
+#     15:00/21:00 IST. src/scheduled.ts derives fast/reconcile mode from the
+#     actual IST clock at runtime, and test/schedule-workflow.test.ts pins the
+#     cron to src/schedule-window.ts so the two cannot drift.
+#   - GitHub cron drifts by minutes (occasionally more under load). A run that
+#     drifts outside the IST schedule window skips itself harmlessly; the
+#     weekday 21:00 reconcile covers a 7-day lookback, so nothing is lost.
+#   - State is restored from R2 at the start (downloads.json, cookie snapshot,
+#     discovery file) and pushed back after every run — including failed runs,
+#     so partial progress and run records are preserved. run.lock/ and debug/
+#     never sync: a stale lock must never block the next runner, and debug
+#     captures must stay private.
+#   - The browser profile is intentionally NOT synced (hundreds of MB). Each
+#     run starts a fresh profile and auto-logs-in with the stored credentials;
+#     the real Chrome channel on GitHub runners keeps Cloudflare challenges rare.
+#   - concurrency keeps at most one run at a time (queued, never cancelled) —
+#     the cloud counterpart of the local file run lock.
+#   - Scheduled workflows are disabled by GitHub after 60 days with no repo
+#     activity; re-enable from the Actions tab, or trigger a manual run below
+#     (Actions → Scheduled downloader → Run now), which also resets the clock.
+
+name: Scheduled downloader
+
+on:
+  schedule:
+    - cron: "30 9,15 * * 1-5" # weekdays 15:00 & 21:00 IST (= UTC+5:30, fixed)
+  workflow_dispatch: # manual "run now" from the GitHub app/UI
+    inputs:
+      force:
+        description: "Run even outside the IST schedule window (shadow tests)"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [run-downloader] # hook for a future Telegram /run webhook bridge
+
+permissions:
+  contents: read
+
+concurrency:
+  group: school-photo-downloader
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # dotenv is a no-op when .env is absent; the app reads process.env
+      # directly, so secrets map 1:1 to the .env names.
+      SCHOOL_URL: ${{ secrets.SCHOOL_URL }}
+      SCHOOL_USERNAME: ${{ secrets.SCHOOL_USERNAME }}
+      SCHOOL_PASSWORD: ${{ secrets.SCHOOL_PASSWORD }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+      # Cloud runner specifics (mirrors the LaunchAgent environment).
+      TZ: Asia/Kolkata
+      HEADLESS: "true"
+      BROWSER_CHANNEL: chrome # real Chrome is preinstalled on runners
+      DIRECT_POLL: "false"
+      LOOKBACK_DAYS: "7"
+      STATE_DIR: ${{ github.workspace }}/.state
+      BROWSER_PROFILE_DIR: ${{ github.workspace }}/.browser-profile
+      DOWNLOAD_DIR: ${{ github.workspace }}/photos
+      # awscli credentials for the R2 S3-compatible endpoint (AWS_REGION=auto
+      # is the documented R2 setting; the endpoint URL is passed explicitly).
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore state from R2
+        run: |
+          aws s3 sync "s3://$R2_BUCKET/state" "$STATE_DIR" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --exclude "run.lock/*" --exclude "debug/*" --exclude "*.corrupt-*"
+
+      - name: Run downloader (scheduled.ts handles IST window + mode + pings)
+        run: npm run scheduled ${{ inputs.force && '-- --force' || '' }}
+
+      - name: Sync new photos to R2 (also on failure — dedupe keeps this safe)
+        if: always()
+        run: |
+          aws s3 sync "$DOWNLOAD_DIR" "s3://$R2_BUCKET/photos" \
+            --endpoint-url "$R2_ENDPOINT"
+
+      - name: Sync state back to R2 (also on failure)
+        if: always()
+        run: |
+          aws s3 sync "$STATE_DIR" "s3://$R2_BUCKET/state" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --exclude "run.lock/*" --exclude "debug/*" --exclude "*.corrupt-*"
