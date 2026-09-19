@@ -21,8 +21,8 @@ async function main(): Promise<void> {
   const force = process.argv.includes("--force");
   const clock = indiaTime();
 
-  if (!isWeekday()) {
-    logInfo("Weekend — skipping.");
+  if (!isWeekday() && !force) {
+    logInfo("Weekend — skipping. Use --force to override.");
     return;
   }
 
