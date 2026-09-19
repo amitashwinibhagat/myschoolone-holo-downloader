@@ -159,6 +159,11 @@ const CHALLENGE_MARKERS = [
   "Just a moment",
   "Checking your browser",
   "needs to review the security of your connection",
+  // Managed-challenge interstitial body text (captured from a real cloud-run
+  // failure): the title reads "Just a moment..." but the body uses these.
+  "Performing security verification",
+  "verifies you are not a bot",
+  "Enable JavaScript and cookies",
 ];
 
 /**
@@ -169,13 +174,22 @@ const CHALLENGE_MARKERS = [
  */
 export async function detectChallengeText(page: Page): Promise<boolean> {
   for (const frame of page.frames()) {
-    let text = "";
+    // The managed challenge puts "Just a moment..." in the TITLE and its
+    // status text in the body — check both surfaces on every frame.
+    let challenged = false;
     try {
-      text = await frame.locator("body").innerText({ timeout: 2_000 });
+      const title = await frame.title();
+      challenged = CHALLENGE_MARKERS.some((marker) => title.includes(marker));
     } catch {
-      text = "";
+      challenged = false;
     }
-    if (CHALLENGE_MARKERS.some((marker) => text.includes(marker))) return true;
+    if (challenged) return true;
+    try {
+      const text = await frame.locator("body").innerText({ timeout: 2_000 });
+      if (CHALLENGE_MARKERS.some((marker) => text.includes(marker))) return true;
+    } catch {
+      /* detached/executing frame — next one */
+    }
   }
   return false;
 }
@@ -185,7 +199,7 @@ export async function detectChallengeText(page: Page): Promise<boolean> {
  * With a clean fingerprint the challenge usually passes automatically within a
  * few seconds; in headed mode the user can also solve it manually.
  */
-export async function waitForHumanCheck(page: Page, timeoutMs = 45_000): Promise<void> {
+export async function waitForHumanCheck(page: Page, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {

@@ -150,6 +150,12 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
   // so total wait scales with what the wrapper is actually doing (~2s per
   // empty round, longer only when a real click is in progress).
   for (let round = 0; round < 12; round += 1) {
+    // A challenge interstitial can appear mid-flow (front-door entry, frame
+    // navigations); wait it out before looking for anything else.
+    if (await detectChallengeText(page)) {
+      await waitForHumanCheck(page);
+      continue;
+    }
     // A cold session can bounce back to the login form after the wrapper
     // reload (rejected cookie / expired redirect). Re-signing in once
     // recovers without burning the whole attempt.
