@@ -75,7 +75,10 @@ jobs:
       HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
       # Cloud runner specifics (mirrors the LaunchAgent environment).
       TZ: Asia/Kolkata
-      HEADLESS: "true"
+      # Headed Chrome under Xvfb: headless mode makes the UA read
+      # "HeadlessChrome", a Cloudflare bot tell — the Mac passes because it
+      # browses headed, so the runner gets a virtual display and does the same.
+      HEADLESS: "false"
       BROWSER_CHANNEL: chrome # real Chrome is preinstalled on runners
       DIRECT_POLL: "false"
       LOOKBACK_DAYS: "7"
@@ -109,9 +112,12 @@ jobs:
       - name: Run downloader (scheduled.ts handles IST window + mode + pings)
         # stderr (Chrome process warnings, Playwright launch errors) stays
         # visible in the log AND is captured for the diagnostics step below.
+        # xvfb provides the virtual display for headed Chrome.
         run: |
+          sudo apt-get install -y xvfb >/dev/null
           mkdir -p "$DOWNLOAD_DIR"
-          npm run scheduled ${{ inputs.force && '-- --force' || '' }} 2> >(tee /tmp/chrome-stderr.log >&2)
+          xvfb-run -a --server-args="-screen 0 1440x1000x24" \
+            npm run scheduled ${{ inputs.force && '-- --force' || '' }} 2> >(tee /tmp/chrome-stderr.log >&2)
 
       - name: Diagnose browser failure (memory, /dev/shm, process stderr)
         if: failure()
