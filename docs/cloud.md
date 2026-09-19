@@ -29,7 +29,7 @@ portal session/OTP flow ever requires a human (see [Limitations](#limitations--m
 
 | Component | Service | Free-tier headroom |
 |---|---|---|
-| Compute | GitHub Actions, `ubuntu-latest` | **Unlimited minutes for public repos**; private repos draw from the 2,000 min/month quota (this workload needs ~200–300) |
+| Compute | GitHub Actions, `ubuntu-latest` | **Unlimited minutes for public repos**; private repos draw from the 2,000 min/month quota (a proven full run takes ~4 min: 129 photos, 7-day reconcile) |
 | Storage | Cloudflare R2 | 10 GB, 1M writes + 10M reads/month, zero egress — a school year of photos fits easily |
 | Notifications | Telegram Bot API | Free |
 | Dead-man alert | Healthchecks.io | Free single check |
@@ -133,10 +133,12 @@ public repo is the recommended posture for this setup.
   no activity for 60 days. GitHub emails before disabling; a manual
   "Run now" (or any commit) resets the clock.
 - **Cloudflare from datacenter IPs**: GitHub runners egress from
-  abuse-heavy Azure ranges, so browser challenges are more likely than from
-  a residential IP. The real Chrome channel mitigates this; if it ever gets
-  bad, a WireGuard tunnel to a home router is the escape hatch (network path
-  only — still no compute dependency on the Mac).
+  abuse-heavy Azure ranges. Two things make it work anyway: the real Chrome
+  channel, and **running headed under Xvfb** — headless mode puts
+  `HeadlessChrome` in the user-agent, which Cloudflare treats as a bot tell
+  (proven in the first shadow runs: headless was challenged indefinitely,
+  headed-virtual-display passed instantly). If challenges ever return, a
+  WireGuard tunnel to a home router is the escape hatch (network path only).
 - **Auto-login**: cloud runs rely on `SCHOOL_USERNAME`/`SCHOOL_PASSWORD`.
   The browser profile is intentionally *not* synced to R2 (hundreds of MB).
   If the portal ever adds an OTP/2FA step to login, that becomes a human
