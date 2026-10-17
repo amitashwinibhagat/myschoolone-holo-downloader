@@ -503,7 +503,24 @@ async function performSignIn(page: Page, username: string, password: string): Pr
   page.on("console", onConsole);
 
   try {
-    await signInControlLocator(page).click();
+    // Playwright's synthetic click does not reliably fire this inline
+    // `onclick="login()"` link (a human click works, the automated one can be a
+    // no-op). Click, then confirm login() actually ran — if not, call it directly.
+    await signInControlLocator(page)
+      .click({ timeout: 10_000 })
+      .catch((error) => {
+        console.warn(`Sign In click failed (${(error as Error).message}) — invoking login() directly.`);
+      });
+    await page.waitForTimeout(300);
+    const invokedAfterClick = await page
+      .evaluate(() => (window as unknown as { __msoLogin?: { invoked: number } }).__msoLogin?.invoked ?? 0)
+      .catch(() => 0);
+    if (invokedAfterClick === 0) {
+      console.warn("Sign In click did not invoke the portal's login() handler — invoking it directly.");
+      await page
+        .evaluate(() => (window as unknown as { login?: () => unknown }).login?.())
+        .catch(() => undefined);
+    }
 
     // login() RSA-encrypts the values and submits via AJAX; wait for the form to
     // actually go away.
