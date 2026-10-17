@@ -5,9 +5,8 @@ import test from "node:test";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = "/nonexistent-dir-for-test";
 
-const { isNavigationInterrupted, isLoginFormVisible, openDailyLogFrame, signInControlLocator } = await import(
-  "../src/portal.js",
-);
+const { isNavigationInterrupted, isLoginFormVisible, openDailyLogFrame, signInControlLocator, describeSignInProbe, waitForLoginHandler } =
+  await import("../src/portal.js");
 
 test("isNavigationInterrupted: matches Playwright's interrupted-navigation error", () => {
   assert.equal(
@@ -108,6 +107,48 @@ test("signInControlLocator: prefers clickable roles and excludes the Sign In hea
   assert.ok(calls.includes("filter:h1, h2, h3, h4, h5, h6"), calls.join(", "));
   // `.first()` must terminate the chain so a duplicated match cannot break click().
   assert.equal(firstResult.click instanceof Function, true);
+});
+
+test("describeSignInProbe: names rejected credentials", () => {
+  const body = JSON.stringify(["Password", "", "", "", "", 1, 1]);
+  assert.match(describeSignInProbe({ status: 200, body, consoleErrors: [] }), /rejected the credentials/);
+});
+
+test("describeSignInProbe: names a locked account", () => {
+  const body = JSON.stringify([5, "", "", "", "", 5, 1]);
+  assert.match(describeSignInProbe({ status: 200, body, consoleErrors: [] }), /account is locked/);
+});
+
+test("describeSignInProbe: flags accepted-but-no-redirect", () => {
+  assert.match(describeSignInProbe({ status: 200, body: JSON.stringify([1]), consoleErrors: [] }), /did not redirect/);
+});
+
+test("describeSignInProbe: reports a request that never completed", () => {
+  assert.match(describeSignInProbe({ consoleErrors: [] }), /never completed/);
+});
+
+test("describeSignInProbe: surfaces a page script error first", () => {
+  const probe = { consoleErrors: ["ReferenceError: login is not defined"] };
+  assert.match(describeSignInProbe(probe), /ReferenceError/);
+});
+
+test("describeSignInProbe: tolerates a non-JSON body (e.g. a challenge page)", () => {
+  assert.match(
+    describeSignInProbe({ status: 403, body: "<html>Just a moment</html>", consoleErrors: [] }),
+    /unreadable logincheck/,
+  );
+});
+
+test("waitForLoginHandler: true once the inline handler exists", async () => {
+  let calls = 0;
+  const page = { evaluate: async () => ++calls >= 2 };
+  assert.equal(await waitForLoginHandler(page as never, 1_000), true);
+  assert.ok(calls >= 2, `expected at least 2 probes, got ${calls}`);
+});
+
+test("waitForLoginHandler: false when the handler never appears, without throwing", async () => {
+  const page = { evaluate: async () => false };
+  assert.equal(await waitForLoginHandler(page as never, 0), false);
 });
 
 // Minimal stubs for openDailyLogFrame: a child frame plus a page whose

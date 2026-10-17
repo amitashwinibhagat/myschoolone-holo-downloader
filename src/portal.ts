@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Frame, Locator, Page } from "playwright";
+import type { ConsoleMessage, Frame, Locator, Page, Response } from "playwright";
 import { detectChallengeText, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { createHash } from "node:crypto";
@@ -331,6 +331,65 @@ export function signInControlLocator(page: Page): Locator {
     .first();
 }
 
+/** What we managed to observe from the portal's `logincheck.php` AJAX POST. */
+export interface SignInProbe {
+  status?: number;
+  body?: string;
+  consoleErrors: string[];
+}
+
+/**
+ * Wait for the portal's inline `login()` submit handler to exist.
+ *
+ * The Sign In control is `<a onclick="login()">` and `login()` is defined in an
+ * inline script that only runs after jQuery/JSEncrypt load. Clicking before then
+ * makes the inline handler throw a ReferenceError and silently does nothing — the
+ * form simply stays put. Bounded and non-fatal: if the handler never shows up we
+ * still click, so a future layout that submits another way is not blocked.
+ */
+export async function waitForLoginHandler(page: Page, timeoutMs = 8_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ready = await withTimeout(
+      page.evaluate(() => typeof (window as unknown as { login?: unknown }).login === "function"),
+      5_000,
+      "Checking for the login() handler",
+    ).catch(() => false);
+    if (ready) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(250);
+  }
+}
+
+/**
+ * Turn the captured `logincheck.php` exchange into a one-line reason.
+ *
+ * `login()` has no AJAX error handler, so a rejected or unparseable response
+ * leaves the form untouched with no lasting visible clue (its toastr hides after
+ * 2s). The response's first field is the portal's verdict: `"Username"`/`"Password"`
+ * = bad credentials, `5` = locked, `1` = accepted but the redirect never landed.
+ */
+export function describeSignInProbe(probe: SignInProbe): string {
+  if (probe.consoleErrors.length > 0) return `page script error: ${probe.consoleErrors[0]}`;
+  if (probe.status === undefined) return "the logincheck.php request never completed (blocked or challenged)";
+  if (probe.body) {
+    let verdict: unknown;
+    try {
+      verdict = (JSON.parse(probe.body) as unknown[])[0];
+    } catch {
+      /* not JSON — fall through to the raw-body reason */
+    }
+    if (verdict === "Username" || verdict === "Password") {
+      return `the portal rejected the credentials (HTTP ${probe.status}, verdict ${verdict})`;
+    }
+    if (verdict === 5) return `the account is locked (HTTP ${probe.status})`;
+    if (verdict === 1) return `credentials accepted but the portal did not redirect (HTTP ${probe.status})`;
+    if (verdict !== undefined) return `unexpected portal verdict ${JSON.stringify(verdict)} (HTTP ${probe.status})`;
+    return `unreadable logincheck.php response (HTTP ${probe.status}): ${probe.body.slice(0, 120)}`;
+  }
+  return `logincheck.php returned HTTP ${probe.status} with an unreadable body`;
+}
+
 /** Fill the login form deterministically and submit. Throws on failure. */
 async function performSignIn(page: Page, username: string, password: string): Promise<void> {
   // Set the values via evaluate so Chrome's autofill/overlays cannot race or
@@ -373,18 +432,48 @@ async function performSignIn(page: Page, username: string, password: string): Pr
   if (!checked) await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
 
   console.log("Login form detected — signing in automatically...");
-  await signInControlLocator(page).click();
 
-  // login() RSA-encrypts the values and submits via AJAX; wait for the form to
-  // actually go away.
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(2_000);
-    if (!(await isLoginFormVisible(page, 1_000))) return;
+  // The inline login() handler must exist or the click is a silent no-op.
+  if (!(await waitForLoginHandler(page))) {
+    console.warn("Portal login() handler not detected — clicking the Sign In control anyway.");
+  }
+
+  // capture what the submit actually did, so a failure is self-explaining.
+  const probe: SignInProbe = { consoleErrors: [] };
+  const onResponse = (response: Response): void => {
+    if (!/logincheck\.php/i.test(response.url())) return;
+    probe.status = response.status();
+    void response
+      .text()
+      .then((body) => {
+        probe.body = body.slice(0, 400);
+      })
+      .catch(() => undefined);
+  };
+  const onConsole = (message: ConsoleMessage): void => {
+    if (message.type() !== "error" || probe.consoleErrors.length >= 20) return;
+    probe.consoleErrors.push(message.text().slice(0, 200));
+  };
+  page.on("response", onResponse);
+  page.on("console", onConsole);
+
+  try {
+    await signInControlLocator(page).click();
+
+    // login() RSA-encrypts the values and submits via AJAX; wait for the form to
+    // actually go away.
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(2_000);
+      if (!(await isLoginFormVisible(page, 1_000))) return;
+    }
+  } finally {
+    page.off("response", onResponse);
+    page.off("console", onConsole);
   }
 
   throw new NeedsHumanLoginError(
-    "Automatic sign-in failed; the login form is still visible. " +
+    `Automatic sign-in failed; the login form is still visible — ${describeSignInProbe(probe)}. ` +
       "Check SCHOOL_USERNAME/SCHOOL_PASSWORD in .env, or run `npm run login` manually.",
   );
 }
