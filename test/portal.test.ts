@@ -123,8 +123,26 @@ test("describeSignInProbe: flags accepted-but-no-redirect", () => {
   assert.match(describeSignInProbe({ status: 200, body: JSON.stringify([1]), consoleErrors: [] }), /did not redirect/);
 });
 
-test("describeSignInProbe: reports a request that never completed", () => {
-  assert.match(describeSignInProbe({ consoleErrors: [] }), /never completed/);
+test("describeSignInProbe: reports that the click never invoked login()", () => {
+  assert.match(describeSignInProbe({ invoked: false, consoleErrors: [] }), /did not invoke the portal's login\(\)/);
+});
+
+test("describeSignInProbe: reports a failed logincheck.php request", () => {
+  const probe = { requested: true, failure: "net::ERR_CONNECTION_RESET", consoleErrors: [] };
+  assert.match(describeSignInProbe(probe), /request failed \(net::ERR_CONNECTION_RESET\)/);
+});
+
+test("describeSignInProbe: reports a request that was sent but never answered", () => {
+  assert.match(describeSignInProbe({ requested: true, consoleErrors: [] }), /never answered/);
+});
+
+test("describeSignInProbe: reports that no logincheck.php request was issued", () => {
+  assert.match(describeSignInProbe({ consoleErrors: [] }), /never issued a logincheck\.php request/);
+});
+
+test("describeSignInProbe: surfaces an error thrown from inside login()", () => {
+  const probe = { requested: true, scriptError: "TypeError: x\n  at login (app.js:1)", consoleErrors: [] };
+  assert.match(describeSignInProbe(probe), /login\(\) threw: TypeError: x/);
 });
 
 test("describeSignInProbe: surfaces a page script error first", () => {

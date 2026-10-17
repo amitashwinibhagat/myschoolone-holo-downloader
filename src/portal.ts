@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ConsoleMessage, Frame, Locator, Page, Response } from "playwright";
+import type { ConsoleMessage, Frame, Locator, Page, Request, Response } from "playwright";
 import { detectChallengeText, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { createHash } from "node:crypto";
@@ -335,6 +335,14 @@ export function signInControlLocator(page: Page): Locator {
 export interface SignInProbe {
   status?: number;
   body?: string;
+  /** True once a logincheck.php request was issued. */
+  requested?: boolean;
+  /** Playwright's network-failure reason, when the request failed. */
+  failure?: string;
+  /** Whether the click actually invoked the portal's login() handler. */
+  invoked?: boolean;
+  /** Error thrown from inside login(), if any. */
+  scriptError?: string;
   consoleErrors: string[];
 }
 
@@ -371,7 +379,13 @@ export async function waitForLoginHandler(page: Page, timeoutMs = 8_000): Promis
  */
 export function describeSignInProbe(probe: SignInProbe): string {
   if (probe.consoleErrors.length > 0) return `page script error: ${probe.consoleErrors[0]}`;
-  if (probe.status === undefined) return "the logincheck.php request never completed (blocked or challenged)";
+  if (probe.invoked === false) return "the Sign In click did not invoke the portal's login() handler";
+  if (probe.scriptError) return `login() threw: ${probe.scriptError.split("\n")[0]}`;
+  if (probe.status === undefined) {
+    if (probe.failure) return `the logincheck.php request failed (${probe.failure})`;
+    if (probe.requested) return "logincheck.php was requested but never answered";
+    return "login() never issued a logincheck.php request";
+  }
   if (probe.body) {
     let verdict: unknown;
     try {
@@ -438,8 +452,37 @@ async function performSignIn(page: Page, username: string, password: string): Pr
     console.warn("Portal login() handler not detected — clicking the Sign In control anyway.");
   }
 
-  // capture what the submit actually did, so a failure is self-explaining.
+  // Wrap login() so we can distinguish "the click never invoked it" from "it ran
+  // but the POST failed", and watch the request lifecycle on the Playwright side.
+  await page
+    .evaluate(() => {
+      const w = window as unknown as {
+        login?: (...args: unknown[]) => unknown;
+        __msoLogin?: { invoked: number; error: string | null };
+      };
+      w.__msoLogin = { invoked: 0, error: null };
+      const original = w.login;
+      if (typeof original !== "function") return;
+      w.login = function (this: unknown, ...args: unknown[]) {
+        w.__msoLogin!.invoked += 1;
+        try {
+          return original.apply(this, args);
+        } catch (error) {
+          w.__msoLogin!.error = String((error as Error)?.stack || error);
+          throw error;
+        }
+      };
+    })
+    .catch(() => undefined);
+
+  // Capture what the submit actually did, so a failure is self-explaining.
   const probe: SignInProbe = { consoleErrors: [] };
+  const onRequest = (request: Request): void => {
+    if (/logincheck\.php/i.test(request.url())) probe.requested = true;
+  };
+  const onRequestFailed = (request: Request): void => {
+    if (/logincheck\.php/i.test(request.url())) probe.failure = request.failure()?.errorText || "unknown failure";
+  };
   const onResponse = (response: Response): void => {
     if (!/logincheck\.php/i.test(response.url())) return;
     probe.status = response.status();
@@ -454,6 +497,8 @@ async function performSignIn(page: Page, username: string, password: string): Pr
     if (message.type() !== "error" || probe.consoleErrors.length >= 20) return;
     probe.consoleErrors.push(message.text().slice(0, 200));
   };
+  page.on("request", onRequest);
+  page.on("requestfailed", onRequestFailed);
   page.on("response", onResponse);
   page.on("console", onConsole);
 
@@ -467,7 +512,17 @@ async function performSignIn(page: Page, username: string, password: string): Pr
       await page.waitForTimeout(2_000);
       if (!(await isLoginFormVisible(page, 1_000))) return;
     }
+
+    const invocation = await page
+      .evaluate(() => (window as unknown as { __msoLogin?: { invoked: number; error: string | null } }).__msoLogin)
+      .catch(() => undefined);
+    if (invocation) {
+      probe.invoked = invocation.invoked > 0;
+      if (invocation.error) probe.scriptError = invocation.error;
+    }
   } finally {
+    page.off("request", onRequest);
+    page.off("requestfailed", onRequestFailed);
     page.off("response", onResponse);
     page.off("console", onConsole);
   }
