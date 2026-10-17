@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Frame, Page } from "playwright";
+import type { Frame, Locator, Page } from "playwright";
 import { detectChallengeText, waitForHumanCheck } from "./browser.js";
 import { config } from "./config.js";
 import { createHash } from "node:crypto";
@@ -311,6 +311,26 @@ export async function ensureLoggedIn(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Locator for the login form's "Sign In" control.
+ *
+ * The portal renders an `<h3>Sign In</h3>` heading next to the real control,
+ * so a bare `getByText("Sign In", { exact: true })` resolves to two nodes and
+ * trips Playwright's strict mode. Prefer the accessible button/link roles, and
+ * only fall back to exact text that is not a heading.
+ */
+export function signInControlLocator(page: Page): Locator {
+  return page
+    .getByRole("button", { name: "Sign In", exact: true })
+    .or(page.getByRole("link", { name: "Sign In", exact: true }))
+    .or(
+      page
+        .getByText("Sign In", { exact: true })
+        .filter({ hasNot: page.locator("h1, h2, h3, h4, h5, h6") }),
+    )
+    .first();
+}
+
 /** Fill the login form deterministically and submit. Throws on failure. */
 async function performSignIn(page: Page, username: string, password: string): Promise<void> {
   // Set the values via evaluate so Chrome's autofill/overlays cannot race or
@@ -353,7 +373,7 @@ async function performSignIn(page: Page, username: string, password: string): Pr
   if (!checked) await page.locator("#imrobot").check({ force: true }).catch(() => undefined);
 
   console.log("Login form detected — signing in automatically...");
-  await page.getByText("Sign In", { exact: true }).click();
+  await signInControlLocator(page).click();
 
   // login() RSA-encrypts the values and submits via AJAX; wait for the form to
   // actually go away.

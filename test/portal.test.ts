@@ -5,7 +5,9 @@ import test from "node:test";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = "/nonexistent-dir-for-test";
 
-const { isNavigationInterrupted, isLoginFormVisible, openDailyLogFrame } = await import("../src/portal.js");
+const { isNavigationInterrupted, isLoginFormVisible, openDailyLogFrame, signInControlLocator } = await import(
+  "../src/portal.js",
+);
 
 test("isNavigationInterrupted: matches Playwright's interrupted-navigation error", () => {
   assert.equal(
@@ -73,6 +75,39 @@ test("isLoginFormVisible: polls until the form appears within the timeout", asyn
   };
   assert.equal(await isLoginFormVisible(page as never, 1_000), true);
   assert.ok(checks >= 2, `expected at least 2 checks, got ${checks}`);
+});
+
+test("signInControlLocator: prefers clickable roles and excludes the Sign In heading", () => {
+  const calls: string[] = [];
+  const firstResult = { click: async () => undefined };
+  const chain = {
+    or: () => chain,
+    first: () => firstResult,
+  };
+  const page = {
+    getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      calls.push(`role:${role}:${options.name}:${options.exact}`);
+      return chain;
+    },
+    getByText: (text: string, options: { exact: boolean }) => {
+      calls.push(`text:${text}:${options.exact}`);
+      return {
+        filter: (opts: { hasNot: { __sel: string } }) => {
+          calls.push(`filter:${opts.hasNot.__sel}`);
+          return chain;
+        },
+      };
+    },
+    locator: (selector: string) => ({ __sel: selector }),
+  };
+
+  assert.equal(signInControlLocator(page as never), firstResult);
+  assert.ok(calls.includes("role:button:Sign In:true"), calls.join(", "));
+  assert.ok(calls.includes("role:link:Sign In:true"), calls.join(", "));
+  // The text fallback must exclude the heading, or strict mode would trip again.
+  assert.ok(calls.includes("filter:h1, h2, h3, h4, h5, h6"), calls.join(", "));
+  // `.first()` must terminate the chain so a duplicated match cannot break click().
+  assert.equal(firstResult.click instanceof Function, true);
 });
 
 // Minimal stubs for openDailyLogFrame: a child frame plus a page whose
