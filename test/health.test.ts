@@ -5,7 +5,7 @@ import test from "node:test";
 process.env.SCHOOL_URL = "https://school.example.com";
 process.env.STATE_DIR = "";
 
-const { decideBaseline, diffFingerprints } = await import("../src/health.js");
+const { decideBaseline, diffFingerprints, normalizeTabLabels } = await import("../src/health.js");
 
 // These are pure functions and do not touch config or the network.
 
@@ -73,4 +73,31 @@ test("decideBaseline: portal returning to normal clears the pending change", () 
   const pendingBaseline = { ...baseline, pendingChange: { hash: "something", detectedAt: "x", changes: ["a"] } };
   const decision = decideBaseline(pendingBaseline, fingerprint("old", { dailydate: "INPUT" }), []);
   assert.equal(decision.action, "recovered");
+});
+
+// --- tab labels -----------------------------------------------------------
+
+test("normalizeTabLabels: collapses whitespace and drops blank labels", () => {
+  assert.deepEqual(normalizeTabLabels(["  Daily\n  Log ", "\t", "   ", "Attendance"]), ["Attendance", "Daily Log"]);
+});
+
+test("normalizeTabLabels: dedupes and sorts for a stable fingerprint", () => {
+  assert.deepEqual(normalizeTabLabels(["Photos", "Attendance", "Photos"]), ["Attendance", "Photos"]);
+});
+
+test("normalizeTabLabels: caps label length so page content cannot leak", () => {
+  const [label] = normalizeTabLabels(["x".repeat(200)]);
+  assert.equal(label.length, 40);
+});
+
+test("normalizeTabLabels: caps the label count", () => {
+  const labels = normalizeTabLabels(Array.from({ length: 80 }, (_, i) => `Tab ${i}`));
+  assert.equal(labels.length, 40);
+});
+
+test("diffFingerprints: a removed nav entry is named, not just counted", () => {
+  const baseline = fingerprint("a", { "tab:Daily Log": "present", "tab:Previous year log": "present" });
+  const current = fingerprint("b", { "tab:Daily Log": "present" });
+  const changes = diffFingerprints(baseline, current);
+  assert.deepEqual(changes, ["Selector removed: tab:Previous year log"]);
 });

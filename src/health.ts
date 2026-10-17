@@ -45,12 +45,28 @@ export interface HealthCheckResult {
 }
 
 /**
+ * Normalize raw tab texts into stable, bounded fingerprint labels.
+ *
+ * Pure and Node-side on purpose: the in-page reader must stay self-contained
+ * for `frame.evaluate()`, and this keeps the label/cap/dedupe rules unit
+ * testable. Length and count are capped so a mis-matched element can never
+ * push page content, or an unbounded list, into the stored fingerprint.
+ */
+export function normalizeTabLabels(rawTexts: string[]): string[] {
+  const labels = rawTexts
+    .map((text) => text.replace(/\s+/g, " ").trim())
+    .filter((label) => label.length > 0)
+    .map((label) => label.slice(0, 40));
+  return [...new Set(labels)].sort().slice(0, 40);
+}
+
+/**
  * Structural fingerprint of the portal's Daily Log page, read inside the
  * browser: key DOM selectors, external script names, and AJAX endpoints.
  * Self-contained (no closure over Node values) so it can be handed to
  * `frame.evaluate()` directly.
  */
-function readPortalStructure(): { selectors: Record<string, string>; scripts: string[]; endpoints: string[] } {
+function readPortalStructure(): { selectors: Record<string, string>; scripts: string[]; endpoints: string[]; rawTabTexts: string[] } {
   const selectors: Record<string, string> = {};
 
   // Check for key DOM elements
@@ -63,9 +79,17 @@ function readPortalStructure(): { selectors: Record<string, string>; scripts: st
   const contentArea = document.querySelector("[class*='content'], [class*='main'], main");
   if (contentArea) selectors.contentArea = contentArea.tagName + (contentArea.className ? `.${contentArea.className.split(" ")[0]}` : "");
 
-  // Check for tab-like navigation
-  const tabs = document.querySelectorAll("[class*='tab'], [role='tab']");
-  selectors.tabCount = String(tabs.length);
+  // Collect the labels of real tab controls. The old `[class*='tab']` count
+  // also swept up `.table`/`.tab-pane` elements — it moved for cosmetic
+  // reasons and never said *what* changed, while pane text is page content
+  // that must never enter the fingerprint. The downloader resolves nav entries
+  // by text (portal.ts, backfill.ts), so naming them is the useful signal.
+  const tabControls = Array.from(
+    document.querySelectorAll(
+      "[role='tab'], [role='tablist'] a, [data-toggle='tab'], [data-bs-toggle='tab'], .nav-tabs a",
+    ),
+  );
+  const rawTabTexts = tabControls.map((el) => (el.textContent || "").slice(0, 200)).slice(0, 60);
 
   // Collect script sources (external only)
   const scripts = Array.from(document.querySelectorAll("script[src]"))
@@ -91,7 +115,7 @@ function readPortalStructure(): { selectors: Record<string, string>; scripts: st
     }
   }
 
-  return { selectors, scripts: scripts.map((s) => s.split("/").pop() || s), endpoints: endpoints.slice(0, 10) };
+  return { selectors, scripts: scripts.map((s) => s.split("/").pop() || s), endpoints: endpoints.slice(0, 10), rawTabTexts };
 }
 
 /**
@@ -112,19 +136,27 @@ async function captureFingerprint(page: Page): Promise<PortalFingerprint> {
   // The portal app renders inside a sub-frame; fingerprinting the top-level
   // frameset would hash an empty shell and flag phantom "changes". Read the
   // same app frame the downloader itself drives.
-  const fingerprint = await withTimeout(
+  const structure = await withTimeout(
     appFrame(page).evaluate(readPortalStructure),
     20_000,
     "Fingerprinting the portal",
   );
 
-  const content = JSON.stringify(fingerprint.selectors) + JSON.stringify(fingerprint.scripts) + JSON.stringify(fingerprint.endpoints);
+  // Tab labels become one selector key each, so a diff names the nav entry
+  // that changed (`Selector removed: tab:Previous year log`) instead of a bare
+  // count that moves for cosmetic reasons.
+  const selectors: Record<string, string> = { ...structure.selectors };
+  for (const label of normalizeTabLabels(structure.rawTabTexts)) selectors[`tab:${label}`] = "present";
+
+  const content = JSON.stringify(selectors) + JSON.stringify(structure.scripts) + JSON.stringify(structure.endpoints);
   const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 
   return {
     capturedAt: new Date().toISOString(),
     url,
-    ...fingerprint,
+    selectors,
+    scripts: structure.scripts,
+    endpoints: structure.endpoints,
     hash,
   };
 }
