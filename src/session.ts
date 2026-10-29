@@ -6,7 +6,8 @@
  * about expiring cookies, and avoid blind retries when a human must re-login.
  */
 import { config } from "./config.js";
-import { loadCookies, sessionExpiresWithin, fetchSameOrigin, DEFAULT_USER_AGENT } from "./http-client.js";
+import { looksLikeChallenge } from "./challenge.js";
+import { loadCookies, fetchSameOrigin, DEFAULT_USER_AGENT } from "./http-client.js";
 
 export type SessionStatus = "ok" | "expired" | "challenge" | "unreachable";
 
@@ -19,17 +20,12 @@ export interface SessionCheckResult {
 
 const PASSWORD_INPUT = /<input[^>]*type=["']?password["']?[^>]*>/i;
 const LOGIN_PATH = /\/(login|signin|sign-in|account)\b/i;
-const CHALLENGE_MARKERS = [
-  "Verifying you are human",
-  "Just a moment",
-  "Checking your browser",
-  "needs to review the security of your connection",
-];
 const SESSION_EXPIRY_WARNING_MS = 48 * 60 * 60 * 1000;
 
 function classifyBody(text: string, finalUrl: string): "ok" | "expired" | "challenge" {
-  const lower = text.toLowerCase();
-  if (CHALLENGE_MARKERS.some((marker) => lower.includes(marker.toLowerCase()))) return "challenge";
+  // Shared marker list with the browser detector, so a managed challenge can
+  // never read as "ok" here and send the direct path into an interstitial.
+  if (looksLikeChallenge(text)) return "challenge";
   if (PASSWORD_INPUT.test(text) || LOGIN_PATH.test(finalUrl)) return "expired";
   return "ok";
 }
@@ -54,7 +50,9 @@ export async function checkSession(): Promise<SessionCheckResult> {
     return { status: "expired", reason: "No cookies in the saved session state.", cookiesExpiringSoon: false };
   }
 
-  const cookiesExpiringSoon = await sessionExpiresWithin(SESSION_EXPIRY_WARNING_MS).catch(() => false);
+  const cookiesExpiringSoon = cookies.some(
+    (c) => typeof c.expires === "number" && c.expires > 0 && c.expires * 1000 < Date.now() + SESSION_EXPIRY_WARNING_MS,
+  );
   const url = new URL("/Web/LearningManagement/daily_planner_parent.php", config.schoolUrl);
 
   try {

@@ -1,7 +1,9 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
+import { looksLikeChallenge } from "./challenge.js";
 import { config } from "./config.js";
 import { DownloadManager } from "./downloads.js";
 import { acquireRunLock } from "./run-lock.js";
+import { restoreSavedSession } from "./session-restore.js";
 import { DownloadStore, type RunMode, type RunSource } from "./store.js";
 
 export interface BrowserSession {
@@ -136,6 +138,19 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
 
   let activePage = context.pages()[0] || (await context.newPage());
 
+  // Warm the context with the saved session so a still-valid cookie skips the
+  // cold sign-in POST. A persistent profile usually carries the session, but a
+  // cloud runner starts with a fresh one every run — and `launchPersistentContext`
+  // rejects `storageState`, so the cookies have to be injected explicitly.
+  // Best-effort by design: on rejection the login form reappears and
+  // ensureLoggedIn signs in exactly as before.
+  const restored = await restoreSavedSession(context);
+  if (restored.injected > 0) {
+    console.log(`Restored ${restored.injected} saved session cookie(s) — sign-in may be unnecessary.`);
+  } else if (restored.error) {
+    console.warn(`Could not restore the saved session (${restored.error}) — starting cold.`);
+  }
+
   const register = (page: Page): void => {
     activePage = page;
     page.on("download", (download) => void downloadManager.captureNativeDownload(download));
@@ -154,18 +169,6 @@ export async function launchBrowser(downloadManager: DownloadManager): Promise<B
   return { context, getPage: () => resolveActivePage(context.pages(), activePage) };
 }
 
-const CHALLENGE_MARKERS = [
-  "Verifying you are human",
-  "Just a moment",
-  "Checking your browser",
-  "needs to review the security of your connection",
-  // Managed-challenge interstitial body text (captured from a real cloud-run
-  // failure): the title reads "Just a moment..." but the body uses these.
-  "Performing security verification",
-  "verifies you are not a bot",
-  "Enable JavaScript and cookies",
-];
-
 /**
  * True when any frame currently shows a Cloudflare challenge interstitial.
  * Scans sub-frames too: the portal serves the app in a frameset, and a
@@ -176,17 +179,14 @@ export async function detectChallengeText(page: Page): Promise<boolean> {
   for (const frame of page.frames()) {
     // The managed challenge puts "Just a moment..." in the TITLE and its
     // status text in the body — check both surfaces on every frame.
-    let challenged = false;
     try {
-      const title = await frame.title();
-      challenged = CHALLENGE_MARKERS.some((marker) => title.includes(marker));
+      if (looksLikeChallenge(await frame.title())) return true;
     } catch {
-      challenged = false;
+      /* detached/navigating frame — fall through to the body check */
     }
-    if (challenged) return true;
     try {
       const text = await frame.locator("body").innerText({ timeout: 2_000 });
-      if (CHALLENGE_MARKERS.some((marker) => text.includes(marker))) return true;
+      if (looksLikeChallenge(text)) return true;
     } catch {
       /* detached/executing frame — next one */
     }

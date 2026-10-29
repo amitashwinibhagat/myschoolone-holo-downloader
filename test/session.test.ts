@@ -24,3 +24,25 @@ test("classifySessionBody: Cloudflare interstitial means challenge", () => {
   assert.equal(classifySessionBody("Just a moment...", "https://school.example.com/"), "challenge");
   assert.equal(classifySessionBody("Verifying you are human", "https://school.example.com/"), "challenge");
 });
+
+// Regression: the session check used to carry only four challenge markers while
+// the browser detector carried seven. A managed challenge that words itself
+// with the body-only markers was classified "ok" here, so the direct-poll path
+// was sent straight into an interstitial. Both now share one list.
+test("classifySessionBody: managed-challenge body text means challenge", () => {
+  for (const marker of [
+    "Performing security verification",
+    "This site verifies you are not a bot",
+    "Enable JavaScript and cookies to continue",
+  ]) {
+    assert.equal(classifySessionBody(`<html><body>${marker}</body></html>`, "https://school.example.com/"), "challenge", marker);
+  }
+});
+
+test("classifySessionBody: marker matching is case-insensitive", () => {
+  assert.equal(classifySessionBody("PERFORMING SECURITY VERIFICATION", "https://school.example.com/"), "challenge");
+});
+
+test("classifySessionBody: ordinary portal copy is not a challenge", () => {
+  assert.equal(classifySessionBody("<html><body>Your child's daily log</body></html>", "https://school.example.com/x"), "ok");
+});
