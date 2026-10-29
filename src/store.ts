@@ -160,7 +160,10 @@ export class DownloadStore {
     this.data.schemaVersion = SCHEMA_VERSION;
     const temp = `${this.filePath}.tmp`;
     try {
-      await fs.writeFile(temp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+      // Compact JSON: this file holds up to MAX_RECORDS entries and is rewritten
+      // on every flush, so indentation would add ~30% pure whitespace to each
+      // write for no benefit (it is machine-read only).
+      await fs.writeFile(temp, JSON.stringify(this.data), { mode: 0o600 });
       await fs.rename(temp, this.filePath);
     } catch (error) {
       // Never leave a half-written .tmp behind to confuse the next load.

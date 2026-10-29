@@ -76,6 +76,25 @@ async function findPickerFrame(page: Page): Promise<Frame | undefined> {
   return undefined;
 }
 
+/**
+ * Poll for the picker frame on a short interval, returning as soon as it
+ * exists. The date picker is the positive readiness signal, so this replaces a
+ * blind 2s-per-round sleep: a fast render now costs ~250ms instead of a full
+ * round, while the overall budget and the frame re-scan are unchanged.
+ *
+ * Bounded by rounds rather than wall-clock (matching the sidebar loop): a wait
+ * that returns instantly can then never spin for the full budget.
+ */
+async function waitForPickerFrame(page: Page, timeoutMs: number, pollMs = 250): Promise<Frame | undefined> {
+  const rounds = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  for (let round = 0; round < rounds; round += 1) {
+    const picker = await findPickerFrame(page);
+    if (picker) return picker;
+    await page.waitForTimeout(pollMs);
+  }
+  return undefined;
+}
+
 async function findSidebarFrame(page: Page): Promise<Frame | undefined> {
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
@@ -138,12 +157,9 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
   // Wait for the planner to render, re-scanning all sub-frames every round:
   // the App.php wrapper rebuilds its frames while we wait (handles go stale)
   // and the picker may live in any sub-frame. The date picker is the positive
-  // readiness signal.
-  for (let waited = 0; waited < 16_000; waited += 2_000) {
-    const picker = await findPickerFrame(page);
-    if (picker) return picker;
-    await page.waitForTimeout(2_000);
-  }
+  // readiness signal, so poll for it rather than sleeping a fixed 2s per round.
+  const initialPicker = await waitForPickerFrame(page, 16_000);
+  if (initialPicker) return initialPicker;
 
   // Not on the planner yet — route through the sidebar inside the wrapper.
   // Bounded by rounds, not wall-clock: each round re-scans the live frames,
@@ -178,17 +194,18 @@ export async function openDailyLogFrame(page: Page): Promise<Frame> {
       .catch(() => false);
     if (!appeared) continue;
     await link.first().click().catch(() => undefined);
-    await page.waitForTimeout(2_000);
 
     // The sidebar expands into a parent item plus a submenu. When more than
     // one "Daily Log" entry is visible, click the deepest (submenu) one.
     const matches = (await findSidebarFrame(page))?.locator("text=/daily\\s*log/i").locator("visible=true");
     if (matches && (await matches.count().catch(() => 0)) > 1) {
       await matches.last().click().catch(() => undefined);
-      await page.waitForTimeout(6_000);
     }
-    const finalFrame = await findPickerFrame(page);
-    if (finalFrame) return finalFrame;
+
+    // Wait for the picker itself (positive signal) instead of a flat 2s + 6s
+    // after each click; the outer rounds still bound the total attempt.
+    const clickedPicker = await waitForPickerFrame(page, 8_000);
+    if (clickedPicker) return clickedPicker;
     // Picker not up yet — pace the retry so we never click-spam the menu
     // while the wrapper is still rebuilding.
     await sleep(2_000);
