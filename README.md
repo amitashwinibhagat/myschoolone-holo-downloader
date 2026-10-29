@@ -44,9 +44,14 @@ Raspberry-Pi-class Mac into a quiet pipeline:
   accepted after **two consecutive** sightings, so a transient Cloudflare
   interstitial never silently rewrites the baseline. You get notified *before*
   downloads break, not after.
-- **📅 Set-and-forget scheduling** — a macOS LaunchAgent runs weekday afternoons
-  and evenings (IST), reconciling the last 7 days each time, with an exclusive
-  run lock so manual and scheduled runs never collide.
+- **📅 Set-and-forget scheduling** — a macOS LaunchAgent fires on weekday
+  afternoons and evenings (IST); whether a fire does work is decided by
+  **staleness**, not the clock hour, so a cron that drifts hours late still
+  runs instead of silently skipping. Stale indexes get the full 7-day
+  reconcile; an exclusive run lock keeps manual and scheduled runs apart.
+- **🔁 Warm session reuse** — the saved login snapshot is injected into the
+  browser too, so runs with a valid cookie skip the cold sign-in POST
+  entirely (falling back to normal sign-in when it has expired).
 - **💬 Telegram remote control** — `/run`, `/status`, `/help` from your phone;
   failure alerts ("LOGIN REQUIRED", "ACTION NEEDED") come to you.
 - **🔒 Privacy-first by default** — no screenshots, no external AI APIs.

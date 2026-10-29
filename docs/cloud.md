@@ -43,9 +43,10 @@ portal session/OTP flow ever requires a human (see [Limitations](#limitations--m
    snapshot, discovery file) from R2 into the workspace. `run.lock/`,
    `debug/`, and `*.corrupt-*` files are excluded both ways: a stale lock
    must never block the next runner, and debug captures must stay private.
-3. **Run** — `npm run scheduled`. The entry point itself derives fast vs
-   reconcile mode from the live IST clock, skips weekends, sends Telegram
-   notifications, and pings Healthchecks.io. It also auto-logs-in to the
+3. **Run** — `npm run scheduled`. Cost, not the clock, decides: the entry point
+   compares the last successful run against the current IST time and picks
+   fast (index < 20 h old) vs reconcile (stale), then sends Telegram
+   notifications and pings Healthchecks.io. It also auto-logs-in to the
    portal using `SCHOOL_USERNAME`/`SCHOOL_PASSWORD` because each runner
    starts with a fresh browser profile. The runner's preinstalled real
    Chrome (`BROWSER_CHANNEL=chrome`) is the Cloudflare defense.
@@ -97,10 +98,9 @@ commands for them at the end.
 
 - Push the workflow to the default branch, then trigger it manually:
   *Actions → Scheduled downloader → Run now* (`workflow_dispatch`), with the
-  **force** input checked. `scheduled.ts` skips runs outside the
-  15:00–21:00 IST window unless forced, and the shadow run intentionally
-  happens at an arbitrary time while the Mac LaunchAgents still own the
-  real schedule.
+  **force** input checked. `--force` bypasses the staleness and quiet-hours
+  guards, so the shadow run happens at an arbitrary time while the Mac
+  LaunchAgents still own the real schedule.
 - Watch the run logs. The first browser-fallback runs from a datacenter IP
   are the ones that prove (or worry) the Cloudflare story — see below.
 - Confirm photos appear in the R2 bucket and Telegram receives the run
@@ -125,10 +125,13 @@ public repo is the recommended posture for this setup.
 
 ## Limitations & mitigations
 
-- **GitHub cron drifts** by minutes (occasionally more under load). Runs that
-  drift outside the IST schedule window skip themselves harmlessly; the
-  weekday 21:00 reconcile covers a 7-day lookback, so nothing is lost — it
-  may just arrive later than the ideal time.
+- **GitHub cron drifts** by minutes (occasionally by hours under load). Because
+  the run decision is based on **staleness** (`decideDue` in
+  `src/schedule-window.ts`), not on the clock hour, a late fire still does its
+  work: an index older than 4 h runs a fast poll, older than 20 h runs the full
+  7-day reconcile. Quiet hours (06:00–23:00 IST) only suppress runs that are
+  *not* genuinely overdue, so a badly drifted overnight fire still recovers
+  instead of being discarded.
 - **60-day auto-disable**: GitHub disables scheduled workflows on repos with
   no activity for 60 days. GitHub emails before disabling; a manual
   "Run now" (or any commit) resets the clock.

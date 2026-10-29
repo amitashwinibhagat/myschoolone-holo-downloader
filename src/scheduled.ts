@@ -4,42 +4,43 @@ import { runJob } from "./run-job.js";
 import { runHealthCheck } from "./health.js";
 import { logInfo, logWarn, logError, pruneDebugDirs } from "./log.js";
 import { indiaTime } from "./utils.js";
-import { modeForClock, nextRunInfo } from "./schedule-window.js";
-
-function isWeekday(): boolean {
-  return indiaTime().weekday >= 1 && indiaTime().weekday <= 5;
-}
-
-/** Determine lookback days based on the schedule mode. */
-function lookbackForMode(mode: "fast" | "reconcile"): number {
-  if (mode === "fast") return 1; // Fast poll: only check today
-  return config.lookbackDays;     // Reconcile: full lookback window
-}
+import { decideDue, lookbackForMode, nextRunInfo } from "./schedule-window.js";
+import { DownloadStore } from "./store.js";
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes("--dry-run");
   const force = process.argv.includes("--force");
   const clock = indiaTime();
 
-  if (!isWeekday() && !force) {
-    logInfo("Weekend — skipping. Use --force to override.");
+  // Base the decision on staleness, not on the clock hour. GitHub's cron drifts
+  // by hours under load, and the old exact-hour window silently discarded those
+  // runs (12 of the last 25 exited here without touching the portal).
+  const store = new DownloadStore(config.stateDir);
+  await store.load();
+  const decision = decideDue(clock, store.lastSuccessfulRunAt(), Date.now(), { force });
+
+  if (!decision.run) {
+    const detail =
+      decision.reason === "fresh"
+        ? "index is already fresh"
+        : decision.reason === "weekend"
+          ? "weekend"
+          : `outside the ${clock.hour}:00 IST run window`;
+    logInfo(`Not due (${detail}) — skipping. Use --force to override.`);
     return;
   }
 
-  // Use the schedule-window to determine the run mode
-  const mode = modeForClock(clock);
-  if (!mode && !force) {
-    logInfo(`Outside schedule window (hour=${clock.hour}) — skipping. Use --force to override.`);
-    return;
-  }
-
-  const effectiveMode: "fast" | "reconcile" = mode || "reconcile";
-  const lookbackDays = lookbackForMode(effectiveMode);
+  const effectiveMode = decision.mode;
+  const lookbackDays = lookbackForMode(effectiveMode, config.lookbackDays);
+  const ageLabel =
+    decision.ageMs === undefined ? "never ran successfully" : `${Math.round(decision.ageMs / 3_600_000)}h since last success`;
 
   if (dryRun) {
-    logInfo(`Dry run: weekday, mode=${effectiveMode}, ${lookbackDays}-day lookback.`);
+    logInfo(`Dry run: ${ageLabel}, mode=${effectiveMode}, ${lookbackDays}-day lookback.`);
     return;
   }
+
+  logInfo(`Due (${ageLabel}) — running ${effectiveMode} with a ${lookbackDays}-day lookback.`);
 
   const { record, result, skipped, lockOwner, error, consecutiveFailures, hint } = await runJob({
     source: "scheduled",
@@ -68,9 +69,8 @@ async function main(): Promise<void> {
     await pingHealthcheck("success");
 
     // Best-effort portal fingerprint check (skipped silently when the browser
-    // lock is held). Only runs on the 9PM reconcile to avoid a second browser
-    // launch after every 3PM fast run. Confirmed changes are notified by
-    // runHealthCheck.
+    // lock is held). Only runs when the sweep was a full reconcile — a health
+    // check launches a second browser, which is wasted after a 1-day fast poll.
     if (effectiveMode === "reconcile") {
       try {
         const health = await runHealthCheck();
